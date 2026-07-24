@@ -6,10 +6,17 @@
 touch /etc/.oasisic-firstboot
 
 # ---- 设置 LuCI 语言 & 主题 & 资源路径（bootstrap 默认）----
-uci set luci.main.lang='zh-cn'
+uci set luci.languages='internal'
+uci set luci.languages.zh_cn='简体中文 (Simplified Chinese)'
+uci set luci.main.lang='zh_cn'
 uci set luci.main.mediaurlbase='/luci-static/bootstrap'
 uci set luci.main.resourcebase='/luci-static/resources'
-uci set luci.title.title='Oasisic OpenWrt'
+
+# ---- 网络诊断默认地址（DNSPod）----
+uci set luci.diag.dns='119.29.29.29'
+uci set luci.diag.ping='119.29.29.29'
+uci set luci.diag.route='119.29.29.29'
+
 uci commit luci
 
 # ---- 默认 DHCP 客户端（无静态 IP）----
