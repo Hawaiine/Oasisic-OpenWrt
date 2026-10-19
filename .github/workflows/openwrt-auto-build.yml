@@ -7,6 +7,13 @@ name: openwrt-auto-build
 on:
   schedule:
     - cron: '0 6 * * *'    # 每天 UTC 06:00 / 北京时间 14:00 检测
+  # PR 里先跑验证：静态检查必跑；全量编译需给 PR 打 ci:full-build 标签
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+      - 'scripts/**'
+      - 'files/**'
+      - 'feeds.conf'
   workflow_dispatch:
     inputs:
       force_build:
@@ -15,6 +22,10 @@ on:
         default: false
       nikki_ref:
         description: 'Nikki ref（tag/branch/sha，空=用 latest tag）'
+        type: string
+        default: ''
+      runner_image:
+        description: 'Runner 镜像（空=仓库变量 RUNNER_IMAGE，再空=ubuntu-26.04）'
         type: string
         default: ''
 
@@ -35,9 +46,38 @@ env:
   MAKE_JOBS: 4                        # GitHub Actions 免费 runner 2 核 4 线程
 
 jobs:
+  # ─── Job 0: 静态检查（PR 必跑，几分钟出结果） ─────────────────────────
+  lint:
+    runs-on: ${{ inputs.runner_image || vars.RUNNER_IMAGE || 'ubuntu-26.04' }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: 🧹 Shell 语法检查
+        run: |
+          set -e
+          shopt -s nullglob
+          for f in scripts/*.sh; do bash -n "$f"; echo "✅ $f"; done
+      - name: 🐍 Python 语法检查
+        run: |
+          set -e
+          for f in scripts/*.py; do python3 -m py_compile "$f"; echo "✅ $f"; done
+      - name: 📄 Workflow YAML 校验
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq python3-yaml
+          python3 -c "import glob,yaml; [print('✅', p) or yaml.safe_load(open(p, encoding='utf-8')) for p in sorted(glob.glob('.github/workflows/*.yml'))]"
+      - name: 🔗 feeds 分隔符契约（40 位 sha 用 ^，tag 用 ;）
+        run: |
+          set -e
+          bash scripts/gen-feeds-conf.sh v25.12.6 31339d53b454f575082dc4e16510c96858e01921 | tee /tmp/f1
+          grep -q 'OpenWrt-nikki.git\^31339d53b454f575082dc4e16510c96858e01921' /tmp/f1 || { echo "❌ 40 位 sha 未用 ^"; exit 1; }
+          bash scripts/gen-feeds-conf.sh v25.12.6 v1.26.2 | tee /tmp/f2
+          grep -q 'OpenWrt-nikki.git;v1.26.2' /tmp/f2 || { echo "❌ tag 未用 ;"; exit 1; }
+          echo "✅ feeds 分隔符契约成立"
+
   # ─── Job 1: 检测上游 ─────────────────────────────────────────────────────
   check-upstream:
-    runs-on: ubuntu-26.04  # 固定 26.04：ubuntu-latest 迁移窗口期不可控（runner-images#14748）
+    runs-on: ${{ inputs.runner_image || vars.RUNNER_IMAGE || 'ubuntu-26.04' }}
     outputs:
       should_build: ${{ steps.check.outputs.should_build }}
       owrt_version: ${{ steps.check.outputs.owrt_version }}
@@ -107,7 +147,9 @@ jobs:
 
           # ── should_build 判定 ──
           FORCE_BUILD="${{ inputs.force_build }}"
-          if [ "$FORCE_BUILD" = "true" ]; then
+          EVENT_NAME="${{ github.event_name }}"
+          # PR 验证构建：忽略 last_build_version 去重，保证每次 PR 都真编
+          if [ "$FORCE_BUILD" = "true" ] || [ "$EVENT_NAME" = "pull_request" ]; then
             echo "should_build=true" >> "$GITHUB_OUTPUT"
             echo "✅ 强制构建（force_build=true）"
           elif [ -z "$OWRT_TAG" ]; then
@@ -127,8 +169,13 @@ jobs:
   # ─── Job 2: 全量 SDK 编译 ──────────────────────────────────────────────
   build:
     needs: check-upstream
-    if: needs.check-upstream.outputs.should_build == 'true'
-    runs-on: ubuntu-26.04  # 固定 26.04：ubuntu-latest 迁移窗口期不可控（runner-images#14748）
+    # PR 只跑静态检查，打上 ci:full-build 标签才跑全量编译（约 90 分钟）
+    if: |
+      needs.check-upstream.outputs.should_build == 'true' && (
+        github.event_name != 'pull_request' ||
+        contains(github.event.pull_request.labels.*.name, 'ci:full-build')
+      )
+    runs-on: ${{ inputs.runner_image || vars.RUNNER_IMAGE || 'ubuntu-26.04' }}
     outputs:
       kernel_version: ${{ steps.kernel-version.outputs.kernel_version }}
       nikki_version_actual: ${{ steps.nikki-version.outputs.nikki_version_actual }}
@@ -408,7 +455,7 @@ jobs:
   qemu-smoke-test:
     needs: [check-upstream, build]
     if: needs.check-upstream.outputs.should_build == 'true'
-    runs-on: ubuntu-26.04  # 固定 26.04：ubuntu-latest 迁移窗口期不可控（runner-images#14748）
+    runs-on: ${{ inputs.runner_image || vars.RUNNER_IMAGE || 'ubuntu-26.04' }}
     steps:
       - name: 📥 下载固件 Artifact
         uses: actions/download-artifact@v7
@@ -532,8 +579,8 @@ jobs:
   # ─── Job 4: 发布 Release + 通知 ──────────────────────────────────────
   release:
     needs: [check-upstream, build, qemu-smoke-test]
-    if: needs.check-upstream.outputs.should_build == 'true'
-    runs-on: ubuntu-26.04  # 固定 26.04：ubuntu-latest 迁移窗口期不可控（runner-images#14748）
+    if: needs.check-upstream.outputs.should_build == 'true' && github.event_name != 'pull_request'
+    runs-on: ${{ inputs.runner_image || vars.RUNNER_IMAGE || 'ubuntu-26.04' }}
     steps:
       - uses: actions/checkout@v7
       - name: 📥 下载固件 Artifact
@@ -641,8 +688,8 @@ jobs:
   # ─── Job 5: 回写 last_build_version（持久化） ──────────────────────────
   persist-last-build:
     needs: [check-upstream, build, qemu-smoke-test, release]
-    if: needs.check-upstream.outputs.should_build == 'true' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-26.04  # 固定 26.04：ubuntu-latest 迁移窗口期不可控（runner-images#14748）
+    if: needs.check-upstream.outputs.should_build == 'true' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ${{ inputs.runner_image || vars.RUNNER_IMAGE || 'ubuntu-26.04' }}
     steps:
       - uses: actions/checkout@v7
         with:
