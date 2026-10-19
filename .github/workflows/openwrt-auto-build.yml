@@ -640,7 +640,7 @@ jobs:
           |----|-----|
           | OpenWrt 版本 | ${{ needs.check-upstream.outputs.owrt_version }} |
           | Nikki 版本 | ${NV} |
-          | Nikki ref | ${NIKKI_REF}（${NIKKI_SHORT}） |
+          | Nikki 提交 | ${NIKKI_SHORT}（ref: ${NIKKI_REF}） |
           RELEASEEOF
           if [ -n "$KV" ] && [ "$KV" != "?" ]; then
             echo "| Linux 内核 | ${KV} |" >> release-body.md
@@ -683,7 +683,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         if: github.ref == 'refs/heads/main'
         with:
-          tag_name: oasisic-${{ needs.check-upstream.outputs.owrt_ver_safe }}-nikki-${{ needs.build.outputs.nikki_short_sha }}
+          tag_name: ${{ needs.check-upstream.outputs.owrt_ver_safe }}-n${{ needs.build.outputs.nikki_short_sha }}
           name: 🏝️ Oasisic OpenWrt ${{ needs.check-upstream.outputs.owrt_ver_safe }} (nikki-${{ needs.build.outputs.nikki_short_sha }})
           fail_on_unmatched_files: false
           make_latest: true
@@ -709,8 +709,8 @@ jobs:
           NIKKI_VER: ${{ needs.build.outputs.nikki_version_actual }}
           KERNEL_VER: ${{ needs.build.outputs.kernel_version }}
           ROOT_PASS: ${{ needs.build.outputs.root_password }}
-          TAG: oasisic-${{ needs.check-upstream.outputs.owrt_ver_safe }}-nikki-${{ needs.build.outputs.nikki_short_sha }}
-          RELEASE_URL: https://github.com/${{ github.repository }}/releases/tag/oasisic-${{ needs.check-upstream.outputs.owrt_ver_safe }}-nikki-${{ needs.build.outputs.nikki_short_sha }}
+          TAG: ${{ needs.check-upstream.outputs.owrt_ver_safe }}-n${{ needs.build.outputs.nikki_short_sha }}
+          RELEASE_URL: https://github.com/${{ github.repository }}/releases/tag/${{ needs.check-upstream.outputs.owrt_ver_safe }}-n${{ needs.build.outputs.nikki_short_sha }}
           BUILD_TIME: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')
         run: python3 scripts/notify-discord.py
         continue-on-error: true
@@ -773,6 +773,33 @@ jobs:
             pr-artifacts/**/config.buildinfo
             pr-artifacts/**/profiles.json
             pr-artifacts/**/feeds.conf.default
+
+  # ─── Job 4.7: 失败通知（任何 job 红都发一张红卡） ──────────────────────
+  notify-failure:
+    needs: [lint, check-upstream, build, qemu-smoke-test, release, ci-prerelease]
+    if: failure()
+    runs-on: ${{ inputs.runner_image || vars.RUNNER_IMAGE || 'ubuntu-26.04' }}
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 📣 发送失败卡片（🖥️・固件发布）
+        env:
+          DISCORD_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          OWRT_VER: ${{ needs.check-upstream.outputs.owrt_version }}
+          NIKKI_REF: ${{ needs.check-upstream.outputs.nikki_ref }}
+          NIKKI_SHORT: ${{ needs.check-upstream.outputs.nikki_short_sha }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/notify-discord-failure.py
+        continue-on-error: true
 
   # ─── Job 5: 回写 last_build_version（持久化） ──────────────────────────
   persist-last-build:

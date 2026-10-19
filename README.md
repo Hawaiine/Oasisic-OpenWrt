@@ -24,6 +24,7 @@
 - [📂 项目结构](#-项目结构)
 - [🚦 构建策略：自动 vs 手动](#-构建策略自动-vs-手动)
 - [🚀 手动构建（workflow_dispatch）](#-手动构建workflow_dispatch)
+- [🧪 PR 验证（先 PR 后合并）](#-pr-验证先-pr-后合并)
 - [🔑 Secrets 与签名](#-secrets-与签名)
 - [🖥️ PVE 导入](#️-pve-导入)
 - [🛡️ 安全与源](#️-安全与源)
@@ -70,7 +71,7 @@
 | 🏗️ 全量 SDK | 从 OpenWrt 源码编译，Nikki / mihomo-meta / luci-app-nikki 由 feeds 源码集成 |
 | 🔄 定时 + 手动 | 每天北京时间 14:00 检测上游；Actions 可手动 `force_build` / `nikki_ref` |
 | 📌 Nikki 钉定 | 解析 Tag/分支/短 SHA → 完整 40 位 SHA；feeds 使用 `url^SHA`（Commit）或 `url;Tag/分支` |
-| 🏷️ Release 命名 | `oasisic-{OpenWrt版本}-nikki-{短SHA}`，避免同 OpenWrt 版互相覆盖 |
+| 🏷️ Release 命名 | `{OpenWrt版本}-n{Nikki短SHA}`（如 `25.12.6-n31339d5`），同版本不同 Nikki 提交可共存 |
 | 🧪 QEMU 门禁 | 启动固件，检查 LuCI HTTP 与 JS 资源 |
 | 🔏 minisign | 对 `sha256sums` 签名，Release 附带 `sha256sums.minisig`（公钥见 `.github/minisign.pub`） |
 | 🖥️ PVE | qemu-ga + virtio 驱动；默认 LAN DHCP，无硬编码局域网 IP |
@@ -138,39 +139,35 @@ uci set luci.diag.route='119.29.29.29'
 
 ## 🏗️ 编译流水线
 
-### 五阶段
+### 八个任务（正式构建与 PR 验证共用一条流水线）
 
+```text
+lint ─ check-upstream ─ build ─ qemu-smoke-test ─┬─ release ── persist-last-build
+                                                 └─ ci-prerelease（仅 PR）
 ```
-check-upstream
-  │  解析 OpenWrt latest tag、Nikki ref → 完整 SHA
-  │  composite = {OWRT_TAG}_nikki-{NIKKI_SHA}
-  │  force_build / 与 last_build_version 比较 → should_build
-  │
-  ├── ⏭️ 无变化 → 结束
-  │
-  └── ✅ 需要构建 → build
-        ├── 缓存恢复（ccache / 源码树 / dl+feeds）
-        ├── 克隆 OpenWrt 指定 tag
-        ├── 随机 root 密码写入 files/etc/shadow
-        ├── gen-feeds-conf.sh + feeds update/install
-        ├── gen-config.sh → defconfig → download → compile
-        ├── minisign / 固件自检 / 文档一致性检查
-        ├── 上传 Artifact
-        ▼
-      qemu-smoke-test（阻断门）
-        ▼
-      release（GitHub Release + Discord）
-        ▼
-      persist-last-build（回写 last_build_version，commit 含 [skip ci]）
-```
+
+| 任务 | 作用 | 何时运行 |
+|------|------|----------|
+| `lint` | `bash -n` / `py_compile` / workflow YAML / feeds 分隔符契约 | 所有 PR 与手动触发 |
+| `check-upstream` | 解析 OpenWrt latest tag、Nikki ref → 完整 SHA；与 `last_build_version` 比对 | 总是 |
+| `build` | 三层缓存 → feeds → `.config` → 编译 → 签名 → 上传 Artifact | 有新版本 / `force_build` / PR 打 `ci:full-build` |
+| `qemu-smoke-test` | QEMU 起固件，LuCI 返回 200 + JS 非 gzip | 同 `build` |
+| `release` | GitHub Release + Discord 成功卡片 | 仅 `main` |
+| `ci-prerelease` | 发 `ci-*` prerelease 直链，便于刷机测试 | 仅 PR |
+| `notify-failure` | 任一任务失败时发红色失败卡片（失败任务 + 失败步骤 + 日志链接） | 任一任务失败 |
+| `persist-last-build` | 回写 `last_build_version`（commit 带 `[skip ci]`） | 仅 `main` |
 
 ### 缓存 Key（摘要）
 
 | 缓存 | Key 要点 |
 |------|----------|
-| ccache | OpenWrt 版本 + `gen-config.sh` hash |
-| 源码树 | OpenWrt 版本 + `gen-config.sh` hash |
+| ccache | OpenWrt 版本 + **runner 镜像** + `gen-config.sh` hash |
+| 源码树 | OpenWrt 版本 + **runner 镜像** + `gen-config.sh` hash（**不做跨镜像前缀回退**） |
 | dl / feeds | OpenWrt 版本 + **Nikki 完整 SHA** + `gen-config.sh` hash |
+
+> 源码树缓存里含 `staging_dir/host` 等构建态，跨镜像复用会让 `make` 误判“工具已编好”，
+> 报 `staging_dir/host/bin/python3: No such file or directory`。恢复缓存后脚本会自检，
+> 不可用则自动清空 `staging_dir/host`、`build_dir/host`、`tmp/stamp` 重建。
 
 清理缓存或删除 `last_build_version` 后，下一次为冷构建（更慢，结果更“干净”）。
 
@@ -237,6 +234,7 @@ Oasisic-Openwrt/
 | **手动 · `nikki_ref` 留空** | 同上，**仍是 latest Tag** | 同上，**与定时相同** | 适合「策略不变，只想再跑一遍」 |
 | **手动 · 填写 `nikki_ref`** | 同上，**仍是 latest Tag** | **你填的 Tag / 分支 / Commit** | 例如 `f06b6b44`、`main`、`v1.26.1` |
 | **`force_build=true`** | 不改变选版 | 不改变选版 | 只强制编译，忽略「版本没变就跳过」 |
+| **PR 触发**（改 workflow / scripts / files） | 同上，**仍是 latest Tag** | 同上 | 默认只跑 `lint`；打 `ci:full-build` 标签才全量编译，产物走 prerelease |
 
 补充（容易误解的点）：
 
@@ -256,6 +254,7 @@ Oasisic-Openwrt/
 |------|------|------|------|
 | `force_build` | 布尔勾选 | false | 跳过版本比对，强制全量编译 |
 | `nikki_ref` | 字符串 | 空 | 空 = 最新 Nikki Tag（与定时相同）；可填 Tag / 分支 / 短或完整 SHA |
+| `runner_image` | 字符串 | 空 | 空 = 仓库变量 `RUNNER_IMAGE`，再空 = `ubuntu-26.04`；可填 `ubuntu-24.04` 做对比验证 |
 
 **`nikki_ref` 规范**
 
@@ -276,9 +275,32 @@ Oasisic-Openwrt/
 成功后：
 
 1. [Releases](https://github.com/Hawaiine/Oasisic-Openwrt/releases) 下载产物  
-2. 标签形如 `oasisic-25.12.5-nikki-f06b6b4`  
-3. 正文含 root 随机密码、Nikki ref、内核版本  
+2. 标签形如 `25.12.6-n31339d5`（`{OpenWrt 版本}-n{Nikki 短 SHA}`）  
+3. 正文含 root 随机密码、Nikki 提交（ref）、内核版本  
 4. 可选出现/更新 `last_build_version`（`persist-last-build` 依赖 token 可推 main）
+
+---
+
+## 🧪 PR 验证（先 PR 后合并）
+
+改 `.github/workflows/**`、`scripts/**`、`files/**`、`feeds.conf` 的 PR 会自动跑验证：
+
+| 层级 | 触发条件 | 内容 | 耗时 |
+|------|----------|------|------|
+| 静态检查 | 自动 | `lint`（bash/py/YAML + feeds 分隔符契约） | 2–3 分钟 |
+| 全量构建 | PR 打上 `ci:full-build` 标签 | `build` + `qemu-smoke-test` + `ci-prerelease` | 冷 90–115 分钟 |
+
+**产物怎么拿**
+
+- Actions Artifact：`oasisic-openwrt-<版本>-pr<PR号>`（如 `oasisic-openwrt-25.12.6-pr5`）
+- 直链 prerelease：`ci-<版本>-pr<PR号>-r<run号>`，如 `ci-25.12.6-pr5-r211`，免登录下载，不会顶掉 latest
+
+**两条铁律**
+
+1. PR 构建**永远不会**发正式 Release
+2. PR 构建**永远不会**回写 `last_build_version`
+
+> 打标签不会自动触发新 run：要么推一个 commit，要么 Actions → Run workflow，`ref` 选 PR 分支。
 
 ---
 
@@ -338,7 +360,7 @@ qm start 100
 三种常见情况：① Nikki 只推了新 commit、还没打新 Tag —— 定时只跟 Tag，需手动填 `nikki_ref`；② 判定为「无变化」（去重生效）；③ 构建真的失败 —— 去 Actions 看那次运行的日志。
 
 **3. 一次构建要多久？**  
-冷构建 60–100 分钟；命中缓存 30–50 分钟（GitHub 免费 runner）。含编译、QEMU 烟雾测试与发布。
+冷构建 90–115 分钟；命中缓存 40–70 分钟（GitHub 免费 runner，2 核 4 线程）。含编译、QEMU 烟雾测试与发布。
 
 **4. 想马上吃到 Nikki 的新 commit（还没发 tag）怎么办？**  
 手动运行并填 `nikki_ref`（`main` 或短 SHA）+ 勾 `force_build`。定时任务不会自动带上未发 Tag 的 commit。
@@ -374,7 +396,9 @@ qm start 100
 | LuCI 转圈 / JS 异常 | 缺 ucode 或静态资源 | 配置中已含 ucode；看 QEMU 步骤日志 |
 | `persist-last-build` 失败 | 无法推 main | 检查 token/分支保护；去重会失效 |
 | 想强制全新构建 | 缓存或版本文件残留 | 清 Actions Cache；删除 `last_build_version`；`force_build=true` |
-| 定时不再触发 / 收到「will be disabled soon」邮件 | 仓库 60 天无新提交，`schedule` 工作流被自动停用 | 推一个提交 + Actions 里 Enable（见下节 ⏰） |
+| `staging_dir/host/bin/python3: No such file or directory` | 源码树缓存跨镜像污染（换了 runner 镜像还吃旧缓存） | 现已在 cache key 加镜像维度并自动自检；必要时手动清 Actions Cache |
+| PR 里 `build` 没跑 | 未打 `ci:full-build` 标签 | 打标签后推一个 commit，或 Run workflow 指定 PR 分支 |
+| 定时不再触发 / 收到「will be disabled soon」邮件 | 仓库 60 天无新提交，`schedule` 工作流被自动停用 | 内置 keepalive 每周心跳；仍失效时推提交 + Enable（见下节 ⏰） |
 
 ### ⏰ 定时工作流被停用（60 天无新提交）
 
@@ -384,6 +408,14 @@ GitHub 规则：**公开仓库在 60 天内没有仓库活动（没有新提交�
 |------|------|
 | 停用前约 7 天 | 收到邮件 `[GitHub] The "openwrt-auto-build" workflow … will be disabled soon` |
 | 到期（最后一次提交后 60 天） | Actions 出现横幅 `This scheduled workflow is disabled because there hasn't been activity in this repository for at least 60 days`；定时构建与 `cleanup-failed-runs` 都不再运行 |
+
+### 💓 自动保活（防止被停用）
+
+仓库内置 `.github/workflows/keepalive.yml`：**每周一 UTC 03:00** 往 `.github/keepalive` 写一次时间戳并提交（commit 带 `[skip ci]`），再顺手检查其它定时工作流的 `state`，发现 `disabled_*` 就调用 API 重新启用。
+
+- 只要心跳能跑，仓库每周都有活动，60 天计时器持续归零
+- 心跳自身也是 schedule 工作流，但它每周都在制造活动，因此不会被自己的规则停掉
+- 若心跳连续失败超过 60 天，仍需人工按下文恢复
 
 **手动恢复（两步，缺一不可）**
 
@@ -413,7 +445,7 @@ GitHub 规则：**公开仓库在 60 天内没有仓库活动（没有新提交�
 ## 📜 版本与发布
 
 - **以 [Releases](https://github.com/Hawaiine/Oasisic-Openwrt/releases) 为准**，不再维护易过期的手工版本表。  
-- 标签格式：`oasisic-{OpenWrt版本号}-nikki-{短SHA}`。  
+- 标签格式：`{OpenWrt版本号}-n{Nikki 短SHA}`，例如 `25.12.6-n31339d5`；PR 验证件为 `ci-{版本号}-pr{PR号}-r{run号}`。  
 - 工程变更看 `git log` / Actions；不在此逐条罗列构建编号。
 
 当前仓库若暂无 Release，说明产物已清理或尚未发布新构建——请直接跑手动/定时流水线生成。
