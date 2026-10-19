@@ -7,6 +7,13 @@ name: openwrt-auto-build
 on:
   schedule:
     - cron: '0 6 * * *'    # 每天 UTC 06:00 / 北京时间 14:00 检测
+  # PR 里先跑验证：静态检查必跑；全量编译需给 PR 打 ci:full-build 标签
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+      - 'scripts/**'
+      - 'files/**'
+      - 'feeds.conf'
   workflow_dispatch:
     inputs:
       force_build:
@@ -15,6 +22,10 @@ on:
         default: false
       nikki_ref:
         description: 'Nikki ref（tag/branch/sha，空=用 latest tag）'
+        type: string
+        default: ''
+      runner_image:
+        description: 'Runner 镜像（空=仓库变量 RUNNER_IMAGE，再空=ubuntu-26.04）'
         type: string
         default: ''
 
@@ -35,11 +46,41 @@ env:
   MAKE_JOBS: 4                        # GitHub Actions 免费 runner 2 核 4 线程
 
 jobs:
+  # ─── Job 0: 静态检查（PR 必跑，几分钟出结果） ─────────────────────────
+  lint:
+    runs-on: ${{ inputs.runner_image || vars.RUNNER_IMAGE || 'ubuntu-26.04' }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: 🧹 Shell 语法检查
+        run: |
+          set -e
+          shopt -s nullglob
+          for f in scripts/*.sh; do bash -n "$f"; echo "✅ $f"; done
+      - name: 🐍 Python 语法检查
+        run: |
+          set -e
+          for f in scripts/*.py; do python3 -m py_compile "$f"; echo "✅ $f"; done
+      - name: 📄 Workflow YAML 校验
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq python3-yaml
+          python3 -c "import glob,yaml; [print('✅', p) or yaml.safe_load(open(p, encoding='utf-8')) for p in sorted(glob.glob('.github/workflows/*.yml'))]"
+      - name: 🔗 feeds 分隔符契约（40 位 sha 用 ^，tag 用 ;）
+        run: |
+          set -e
+          bash scripts/gen-feeds-conf.sh v25.12.6 31339d53b454f575082dc4e16510c96858e01921 | tee /tmp/f1
+          grep -q 'OpenWrt-nikki.git\^31339d53b454f575082dc4e16510c96858e01921' /tmp/f1 || { echo "❌ 40 位 sha 未用 ^"; exit 1; }
+          bash scripts/gen-feeds-conf.sh v25.12.6 v1.26.2 | tee /tmp/f2
+          grep -q 'OpenWrt-nikki.git;v1.26.2' /tmp/f2 || { echo "❌ tag 未用 ;"; exit 1; }
+          echo "✅ feeds 分隔符契约成立"
+
   # ─── Job 1: 检测上游 ─────────────────────────────────────────────────────
   check-upstream:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner_image || vars.RUNNER_IMAGE || 'ubuntu-26.04' }}
     outputs:
       should_build: ${{ steps.check.outputs.should_build }}
+      artifact_name: ${{ steps.check.outputs.artifact_name }}
       owrt_version: ${{ steps.check.outputs.owrt_version }}
       owrt_ver_safe: ${{ steps.check.outputs.owrt_ver_safe }}
       kernel_version: ${{ steps.check.outputs.kernel_version }}
@@ -54,6 +95,7 @@ jobs:
         id: check
         run: |
           SAVED=$(cat ${{ env.LAST_VERSION_FILE }} 2>/dev/null || echo "none")
+          EVENT_NAME="${{ github.event_name }}"
 
           # ── OpenWrt latest tag ──
           OWRT_TAG=$(curl -sL "https://api.github.com/repos/${{ env.OWRT_REPO }}/releases/latest" \
@@ -62,6 +104,14 @@ jobs:
 
           OWRT_SAFE="${OWRT_TAG#v}"
           echo "owrt_ver_safe=$OWRT_SAFE" >> "$GITHUB_OUTPUT"
+
+          # Artifact 名：PR 构建加 -pr<编号>，避免和正式件同名，下载区一眼能分
+          ARTIFACT_NAME="oasisic-openwrt-${OWRT_SAFE}"
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            ARTIFACT_NAME="${ARTIFACT_NAME}-pr${{ github.event.pull_request.number }}"
+          fi
+          echo "artifact_name=$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
+          echo "📦 Artifact 名: $ARTIFACT_NAME"
 
           # ── 内核版本（仅展示，不作为 should_build 信号） ──
           KERNEL_VER=$(curl -sL "https://www.kernel.org/releases.json" \
@@ -107,7 +157,8 @@ jobs:
 
           # ── should_build 判定 ──
           FORCE_BUILD="${{ inputs.force_build }}"
-          if [ "$FORCE_BUILD" = "true" ]; then
+          # PR 验证构建：忽略 last_build_version 去重，保证每次 PR 都真编
+          if [ "$FORCE_BUILD" = "true" ] || [ "$EVENT_NAME" = "pull_request" ]; then
             echo "should_build=true" >> "$GITHUB_OUTPUT"
             echo "✅ 强制构建（force_build=true）"
           elif [ -z "$OWRT_TAG" ]; then
@@ -127,8 +178,13 @@ jobs:
   # ─── Job 2: 全量 SDK 编译 ──────────────────────────────────────────────
   build:
     needs: check-upstream
-    if: needs.check-upstream.outputs.should_build == 'true'
-    runs-on: ubuntu-latest
+    # PR 只跑静态检查，打上 ci:full-build 标签才跑全量编译（约 90 分钟）
+    if: |
+      needs.check-upstream.outputs.should_build == 'true' && (
+        github.event_name != 'pull_request' ||
+        contains(github.event.pull_request.labels.*.name, 'ci:full-build')
+      )
+    runs-on: ${{ inputs.runner_image || vars.RUNNER_IMAGE || 'ubuntu-26.04' }}
     outputs:
       kernel_version: ${{ steps.kernel-version.outputs.kernel_version }}
       nikki_version_actual: ${{ steps.nikki-version.outputs.nikki_version_actual }}
@@ -152,7 +208,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
-            build-essential libncurses5-dev libncursesw5-dev \
+            build-essential libncurses-dev \
             zlib1g-dev gawk git gettext wget unzip python3 \
             file qemu-utils ccache genisoimage
 
@@ -160,19 +216,21 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ccache-openwrt-${{ needs.check-upstream.outputs.owrt_ver_safe }}-${{ hashFiles('scripts/gen-config.sh') }}
+          # 镜像必须进 key：ccache 产物与宿主编译器版本强相关
+          key: ccache-openwrt-${{ needs.check-upstream.outputs.owrt_ver_safe }}-${{ inputs.runner_image || vars.RUNNER_IMAGE || 'ubuntu-26.04' }}-${{ hashFiles('scripts/gen-config.sh') }}
           restore-keys: |
-            ccache-openwrt-${{ needs.check-upstream.outputs.owrt_ver_safe }}-
-            ccache-openwrt-
+            ccache-openwrt-${{ needs.check-upstream.outputs.owrt_ver_safe }}-${{ inputs.runner_image || vars.RUNNER_IMAGE || 'ubuntu-26.04' }}-
 
       - name: 💾 恢复源码树缓存
         id: source-cache
         uses: actions/cache@v5
         with:
           path: ${{ env.BUILD_DIR }}
-          key: source-openwrt-${{ needs.check-upstream.outputs.owrt_ver_safe }}-${{ hashFiles('scripts/gen-config.sh') }}
+          # 镜像必须进 key，且不做前缀回退：源码树里含 staging_dir/host 等构建态，
+          # 跨镜像/跨 config 的部分恢复会让 make 误判"工具已编好"（#210 即因此失败）
+          key: source-openwrt-${{ needs.check-upstream.outputs.owrt_ver_safe }}-${{ inputs.runner_image || vars.RUNNER_IMAGE || 'ubuntu-26.04' }}-${{ hashFiles('scripts/gen-config.sh') }}
           restore-keys: |
-            source-openwrt-${{ needs.check-upstream.outputs.owrt_ver_safe }}-
+            source-openwrt-${{ needs.check-upstream.outputs.owrt_ver_safe }}-${{ inputs.runner_image || vars.RUNNER_IMAGE || 'ubuntu-26.04' }}-
 
       - name: 💾 恢复 dl 缓存
         uses: actions/cache@v5
@@ -180,10 +238,28 @@ jobs:
           path: |
             ${{ env.BUILD_DIR }}/dl
             ${{ env.BUILD_DIR }}/feeds
+          # dl 只是源码包 tarball，跨镜像复用安全，故不带镜像维度
           key: dl-openwrt-${{ needs.check-upstream.outputs.owrt_ver_safe }}-${{ needs.check-upstream.outputs.nikki_sha }}-${{ hashFiles('scripts/gen-config.sh') }}
           restore-keys: |
             dl-openwrt-${{ needs.check-upstream.outputs.owrt_ver_safe }}-
             dl-openwrt-
+
+      - name: 🧪 源码树缓存一致性自检
+        run: |
+          set +e
+          HOSTBIN="${{ env.BUILD_DIR }}/staging_dir/host/bin"
+          if [ -d "${{ env.BUILD_DIR }}/staging_dir" ]; then
+            if "$HOSTBIN/python3" --version >/dev/null 2>&1; then
+              echo "✅ 继承的 host 工具链可用：$("$HOSTBIN/python3" --version 2>&1)"
+            else
+              echo "⚠️ 继承的 host 工具链不可用（多为跨镜像/跨 config 缓存污染），清理后重建"
+              rm -rf "${{ env.BUILD_DIR }}/staging_dir/host" "${{ env.BUILD_DIR }}/build_dir/host"
+              rm -rf "${{ env.BUILD_DIR }}/tmp/stamp"
+            fi
+          else
+            echo "ℹ️ 无源码树缓存，属冷构建"
+          fi
+          set -e
 
       - name: ⬇️ 克隆 OpenWrt 源码（自动重试）
         if: steps.source-cache.outputs.cache-hit != 'true'
@@ -387,10 +463,17 @@ jobs:
           echo "${{ needs.check-upstream.outputs.owrt_version }}_nikki-${{ needs.check-upstream.outputs.nikki_sha }}" \
             > "${{ env.LAST_VERSION_FILE }}"
 
+      - name: 📝 产物下载入口写入 Summary
+        run: |
+          echo "### 📥 固件下载" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Run 页面 Artifacts：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}#artifacts" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Artifact 名：\`${{ needs.check-upstream.outputs.artifact_name }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 命令行：\`gh run download ${{ github.run_id }} -n ${{ needs.check-upstream.outputs.artifact_name }}\`" >> "$GITHUB_STEP_SUMMARY"
+
       - name: 📤 上传固件 Artifact
         uses: actions/upload-artifact@v7
         with:
-          name: oasisic-openwrt-${{ needs.check-upstream.outputs.owrt_ver_safe }}
+          name: ${{ needs.check-upstream.outputs.artifact_name }}
           path: |
             ${{ env.BUILD_DIR }}/bin/targets/x86/64/openwrt-x86-64-generic-squashfs-combined-efi.img.gz
             ${{ env.BUILD_DIR }}/bin/targets/x86/64/openwrt-x86-64-generic-squashfs-combined.img.gz
@@ -408,12 +491,12 @@ jobs:
   qemu-smoke-test:
     needs: [check-upstream, build]
     if: needs.check-upstream.outputs.should_build == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner_image || vars.RUNNER_IMAGE || 'ubuntu-26.04' }}
     steps:
       - name: 📥 下载固件 Artifact
         uses: actions/download-artifact@v7
         with:
-          name: oasisic-openwrt-${{ needs.check-upstream.outputs.owrt_ver_safe }}
+          name: ${{ needs.check-upstream.outputs.artifact_name }}
           path: firmware/
 
       - name: 🚀 QEMU 烟雾测试
@@ -433,7 +516,11 @@ jobs:
           IMG="${FIRMWARE_GZ%.gz}"
           echo "📦 固件: $(basename "$IMG") ($(du -h "$IMG" | cut -f1))"
 
-          sudo apt-get install -y -qq qemu-system-x86-64 ovmf 2>/dev/null || true
+          # 26.04 起包名由 qemu-system-x86-64 改为 qemu-system-x86；按序回退，装不上就硬失败（禁止静默跳过）
+          for pkg in qemu-system-x86 qemu-system-x86-64 qemu-system; do
+            if sudo apt-get install -y -qq "$pkg" ovmf 2>/dev/null; then echo "✅ qemu 包: $pkg"; break; fi
+          done
+          command -v qemu-system-x86_64 >/dev/null || { echo "❌ 未安装 qemu-system-x86_64，烟雾测试无法进行"; exit 1; }
 
           OVMF_CODE=""
           for f in /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd; do
@@ -528,14 +615,14 @@ jobs:
   # ─── Job 4: 发布 Release + 通知 ──────────────────────────────────────
   release:
     needs: [check-upstream, build, qemu-smoke-test]
-    if: needs.check-upstream.outputs.should_build == 'true'
-    runs-on: ubuntu-latest
+    if: needs.check-upstream.outputs.should_build == 'true' && github.event_name != 'pull_request'
+    runs-on: ${{ inputs.runner_image || vars.RUNNER_IMAGE || 'ubuntu-26.04' }}
     steps:
       - uses: actions/checkout@v7
       - name: 📥 下载固件 Artifact
         uses: actions/download-artifact@v7
         with:
-          name: oasisic-openwrt-${{ needs.check-upstream.outputs.owrt_ver_safe }}
+          name: ${{ needs.check-upstream.outputs.artifact_name }}
           path: release-artifacts/
 
       - name: 🏷️ 生成 Release body
@@ -634,11 +721,64 @@ jobs:
           rm -f release-body.md
           rm -rf release-artifacts
 
+  # ─── Job 4.5: PR 验证件发 prerelease（仅 PR 全量构建） ─────────────────
+  # 目的：PR 里编出来的固件可以直接下载刷机测试，又不混进正式 Release
+  ci-prerelease:
+    needs: [check-upstream, build, qemu-smoke-test]
+    if: github.event_name == 'pull_request' && needs.check-upstream.outputs.should_build == 'true'
+    runs-on: ${{ inputs.runner_image || vars.RUNNER_IMAGE || 'ubuntu-26.04' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 📥 下载固件 Artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ needs.check-upstream.outputs.artifact_name }}
+          path: pr-artifacts/
+
+      - name: 🏷️ 计算 prerelease tag
+        id: tag
+        run: |
+          TAG="ci-${{ needs.check-upstream.outputs.owrt_ver_safe }}-pr${{ github.event.pull_request.number }}-r${{ github.run_number }}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "### 🧪 PR 验证件" >> "$GITHUB_STEP_SUMMARY"
+          echo "- tag：\`$TAG\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 直链：${{ github.server_url }}/${{ github.repository }}/releases/tag/$TAG" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 🚀 发布 prerelease（不覆盖 latest）
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: 🧪 PR 验证件 ${{ needs.check-upstream.outputs.owrt_ver_safe }} (PR #${{ github.event.pull_request.number }})
+          prerelease: true
+          make_latest: false
+          generate_release_notes: false
+          body: |
+            ## 🧪 PR 验证件（非正式发布）
+
+            | 项 | 值 |
+            |----|-----|
+            | OpenWrt | ${{ needs.check-upstream.outputs.owrt_version }} |
+            | Nikki | ${{ needs.check-upstream.outputs.nikki_tag }}（${{ needs.check-upstream.outputs.nikki_short_sha }}） |
+            | Runner | ${{ inputs.runner_image || vars.RUNNER_IMAGE || 'ubuntu-26.04' }} |
+            | PR | #${{ github.event.pull_request.number }} |
+            | 触发 | ${{ github.event.pull_request.html_url }} |
+
+            仅供 PR 验证刷机测试，**不是正式版**；正式版走 main 的自动构建。
+          files: |
+            pr-artifacts/**/*.img.gz
+            pr-artifacts/**/*.iso
+            pr-artifacts/**/sha256sums
+            pr-artifacts/**/sha256sums.minisig
+            pr-artifacts/**/config.buildinfo
+            pr-artifacts/**/profiles.json
+            pr-artifacts/**/feeds.conf.default
+
   # ─── Job 5: 回写 last_build_version（持久化） ──────────────────────────
   persist-last-build:
     needs: [check-upstream, build, qemu-smoke-test, release]
-    if: needs.check-upstream.outputs.should_build == 'true' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    if: needs.check-upstream.outputs.should_build == 'true' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ${{ inputs.runner_image || vars.RUNNER_IMAGE || 'ubuntu-26.04' }}
     steps:
       - uses: actions/checkout@v7
         with:
