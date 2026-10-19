@@ -37,7 +37,7 @@ env:
 jobs:
   # ─── Job 1: 检测上游 ─────────────────────────────────────────────────────
   check-upstream:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # 固定 24.04：ubuntu-latest 自 2026-10-19 起迁移到 Ubuntu 26.04（runner-images#14748）
     outputs:
       should_build: ${{ steps.check.outputs.should_build }}
       owrt_version: ${{ steps.check.outputs.owrt_version }}
@@ -128,7 +128,7 @@ jobs:
   build:
     needs: check-upstream
     if: needs.check-upstream.outputs.should_build == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # 固定 24.04：ubuntu-latest 自 2026-10-19 起迁移到 Ubuntu 26.04（runner-images#14748）
     outputs:
       kernel_version: ${{ steps.kernel-version.outputs.kernel_version }}
       nikki_version_actual: ${{ steps.nikki-version.outputs.nikki_version_actual }}
@@ -408,7 +408,7 @@ jobs:
   qemu-smoke-test:
     needs: [check-upstream, build]
     if: needs.check-upstream.outputs.should_build == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # 固定 24.04：ubuntu-latest 自 2026-10-19 起迁移到 Ubuntu 26.04（runner-images#14748）
     steps:
       - name: 📥 下载固件 Artifact
         uses: actions/download-artifact@v7
@@ -529,7 +529,7 @@ jobs:
   release:
     needs: [check-upstream, build, qemu-smoke-test]
     if: needs.check-upstream.outputs.should_build == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # 固定 24.04：ubuntu-latest 自 2026-10-19 起迁移到 Ubuntu 26.04（runner-images#14748）
     steps:
       - uses: actions/checkout@v7
       - name: 📥 下载固件 Artifact
@@ -638,7 +638,7 @@ jobs:
   persist-last-build:
     needs: [check-upstream, build, qemu-smoke-test, release]
     if: needs.check-upstream.outputs.should_build == 'true' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # 固定 24.04：ubuntu-latest 自 2026-10-19 起迁移到 Ubuntu 26.04（runner-images#14748）
     steps:
       - uses: actions/checkout@v7
         with:

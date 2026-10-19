@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   cleanup:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # 固定 24.04：ubuntu-latest 自 2026-10-19 起迁移到 Ubuntu 26.04（runner-images#14748）
     steps:
       - uses: actions/checkout@v7
 
