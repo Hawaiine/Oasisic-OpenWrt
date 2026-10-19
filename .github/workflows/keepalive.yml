@@ -1,0 +1,67 @@
+name: keepalive
+
+# GitHub 会在「仓库 60 天无提交活动」后自动停用所有 schedule 工作流。
+# 本仓库只在上游有新版本时（persist-last-build）才产生提交，
+# OpenWrt / Nikki 长期不发版就会零提交 → 被停。
+# 这个心跳每周制造一次提交，把 60 天计时器持续归零，并顺手修复被停用的定时工作流。
+
+on:
+  schedule:
+    - cron: '0 3 * * 1'   # 每周一 UTC 03:00（北京 11:00）
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: keepalive
+  cancel-in-progress: false
+
+jobs:
+  heartbeat:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - name: 📥 检出
+        uses: actions/checkout@v7
+
+      - name: 💓 写入心跳时间戳并提交
+        run: |
+          set -euo pipefail
+          mkdir -p .github
+          date -u '+%Y-%m-%dT%H:%M:%SZ' > .github/keepalive
+          echo "心跳：$(cat .github/keepalive)"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- .github/keepalive; then
+            echo "无变化，跳过提交"
+            exit 0
+          fi
+          git add .github/keepalive
+          git commit -m "💓 keepalive: $(cat .github/keepalive) [skip ci]"
+          git push
+
+      - name: 🩺 自愈被停用的定时工作流
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          API="https://api.github.com/repos/${{ github.repository }}/actions/workflows"
+          curl -sS -H "Authorization: Bearer $GH_TOKEN" \
+                   -H "Accept: application/vnd.github+json" \
+                   -H "X-GitHub-Api-Version: 2022-11-28" "$API" \
+            | python3 -c 'import json,sys; [print(w["id"], w["state"], w["path"]) for w in json.load(sys.stdin)["workflows"]]' \
+            > /tmp/wfs.txt
+          while read -r id state path; do
+            if [ "$state" = "active" ]; then
+              echo "✅ $path（active）"
+            else
+              echo "⚠️ $path 状态=$state，尝试启用"
+              code=$(curl -sS -o /dev/null -w '%{http_code}' -X PUT \
+                     -H "Authorization: Bearer $GH_TOKEN" \
+                     -H "Accept: application/vnd.github+json" \
+                     -H "X-GitHub-Api-Version: 2022-11-28" "$API/$id/enable")
+              echo "   enable → HTTP $code"
+            fi
+          done < /tmp/wfs.txt

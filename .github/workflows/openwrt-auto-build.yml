@@ -640,7 +640,7 @@ jobs:
           |----|-----|
           | OpenWrt 版本 | ${{ needs.check-upstream.outputs.owrt_version }} |
           | Nikki 版本 | ${NV} |
-          | Nikki ref | ${NIKKI_REF}（${NIKKI_SHORT}） |
+          | Nikki 提交 | ${NIKKI_SHORT}（ref: ${NIKKI_REF}） |
           RELEASEEOF
           if [ -n "$KV" ] && [ "$KV" != "?" ]; then
             echo "| Linux 内核 | ${KV} |" >> release-body.md
@@ -683,7 +683,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         if: github.ref == 'refs/heads/main'
         with:
-          tag_name: oasisic-${{ needs.check-upstream.outputs.owrt_ver_safe }}-nikki-${{ needs.build.outputs.nikki_short_sha }}
+          tag_name: ${{ needs.check-upstream.outputs.owrt_ver_safe }}-n${{ needs.build.outputs.nikki_short_sha }}
           name: 🏝️ Oasisic OpenWrt ${{ needs.check-upstream.outputs.owrt_ver_safe }} (nikki-${{ needs.build.outputs.nikki_short_sha }})
           fail_on_unmatched_files: false
           make_latest: true
@@ -709,8 +709,8 @@ jobs:
           NIKKI_VER: ${{ needs.build.outputs.nikki_version_actual }}
           KERNEL_VER: ${{ needs.build.outputs.kernel_version }}
           ROOT_PASS: ${{ needs.build.outputs.root_password }}
-          TAG: oasisic-${{ needs.check-upstream.outputs.owrt_ver_safe }}-nikki-${{ needs.build.outputs.nikki_short_sha }}
-          RELEASE_URL: https://github.com/${{ github.repository }}/releases/tag/oasisic-${{ needs.check-upstream.outputs.owrt_ver_safe }}-nikki-${{ needs.build.outputs.nikki_short_sha }}
+          TAG: ${{ needs.check-upstream.outputs.owrt_ver_safe }}-n${{ needs.build.outputs.nikki_short_sha }}
+          RELEASE_URL: https://github.com/${{ github.repository }}/releases/tag/${{ needs.check-upstream.outputs.owrt_ver_safe }}-n${{ needs.build.outputs.nikki_short_sha }}
           BUILD_TIME: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')
         run: python3 scripts/notify-discord.py
         continue-on-error: true
