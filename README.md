@@ -139,7 +139,7 @@ uci set luci.diag.route='119.29.29.29'
 
 ## 🏗️ 编译流水线
 
-### 七个任务（正式构建与 PR 验证共用一条流水线）
+### 八个任务（正式构建与 PR 验证共用一条流水线）
 
 ```text
 lint ─ check-upstream ─ build ─ qemu-smoke-test ─┬─ release ── persist-last-build
@@ -152,8 +152,9 @@ lint ─ check-upstream ─ build ─ qemu-smoke-test ─┬─ release ── p
 | `check-upstream` | 解析 OpenWrt latest tag、Nikki ref → 完整 SHA；与 `last_build_version` 比对 | 总是 |
 | `build` | 三层缓存 → feeds → `.config` → 编译 → 签名 → 上传 Artifact | 有新版本 / `force_build` / PR 打 `ci:full-build` |
 | `qemu-smoke-test` | QEMU 起固件，LuCI 返回 200 + JS 非 gzip | 同 `build` |
-| `release` | GitHub Release + Discord 通知 | 仅 `main` |
+| `release` | GitHub Release + Discord 成功卡片 | 仅 `main` |
 | `ci-prerelease` | 发 `ci-*` prerelease 直链，便于刷机测试 | 仅 PR |
+| `notify-failure` | 任一任务失败时发红色失败卡片（失败任务 + 失败步骤 + 日志链接） | 任一任务失败 |
 | `persist-last-build` | 回写 `last_build_version`（commit 带 `[skip ci]`） | 仅 `main` |
 
 ### 缓存 Key（摘要）
