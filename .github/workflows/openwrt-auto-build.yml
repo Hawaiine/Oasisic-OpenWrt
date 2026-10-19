@@ -37,7 +37,7 @@ env:
 jobs:
   # ─── Job 1: 检测上游 ─────────────────────────────────────────────────────
   check-upstream:
-    runs-on: ubuntu-24.04  # 固定 24.04：ubuntu-latest 自 2026-10-19 起迁移到 Ubuntu 26.04（runner-images#14748）
+    runs-on: ubuntu-26.04  # 固定 26.04：ubuntu-latest 迁移窗口期不可控（runner-images#14748）
     outputs:
       should_build: ${{ steps.check.outputs.should_build }}
       owrt_version: ${{ steps.check.outputs.owrt_version }}
@@ -128,7 +128,7 @@ jobs:
   build:
     needs: check-upstream
     if: needs.check-upstream.outputs.should_build == 'true'
-    runs-on: ubuntu-24.04  # 固定 24.04：ubuntu-latest 自 2026-10-19 起迁移到 Ubuntu 26.04（runner-images#14748）
+    runs-on: ubuntu-26.04  # 固定 26.04：ubuntu-latest 迁移窗口期不可控（runner-images#14748）
     outputs:
       kernel_version: ${{ steps.kernel-version.outputs.kernel_version }}
       nikki_version_actual: ${{ steps.nikki-version.outputs.nikki_version_actual }}
@@ -152,7 +152,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
-            build-essential libncurses5-dev libncursesw5-dev \
+            build-essential libncurses-dev \
             zlib1g-dev gawk git gettext wget unzip python3 \
             file qemu-utils ccache genisoimage
 
@@ -408,7 +408,7 @@ jobs:
   qemu-smoke-test:
     needs: [check-upstream, build]
     if: needs.check-upstream.outputs.should_build == 'true'
-    runs-on: ubuntu-24.04  # 固定 24.04：ubuntu-latest 自 2026-10-19 起迁移到 Ubuntu 26.04（runner-images#14748）
+    runs-on: ubuntu-26.04  # 固定 26.04：ubuntu-latest 迁移窗口期不可控（runner-images#14748）
     steps:
       - name: 📥 下载固件 Artifact
         uses: actions/download-artifact@v7
@@ -433,7 +433,11 @@ jobs:
           IMG="${FIRMWARE_GZ%.gz}"
           echo "📦 固件: $(basename "$IMG") ($(du -h "$IMG" | cut -f1))"
 
-          sudo apt-get install -y -qq qemu-system-x86-64 ovmf 2>/dev/null || true
+          # 26.04 起包名由 qemu-system-x86-64 改为 qemu-system-x86；按序回退，装不上就硬失败（禁止静默跳过）
+          for pkg in qemu-system-x86 qemu-system-x86-64 qemu-system; do
+            if sudo apt-get install -y -qq "$pkg" ovmf 2>/dev/null; then echo "✅ qemu 包: $pkg"; break; fi
+          done
+          command -v qemu-system-x86_64 >/dev/null || { echo "❌ 未安装 qemu-system-x86_64，烟雾测试无法进行"; exit 1; }
 
           OVMF_CODE=""
           for f in /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd; do
@@ -529,7 +533,7 @@ jobs:
   release:
     needs: [check-upstream, build, qemu-smoke-test]
     if: needs.check-upstream.outputs.should_build == 'true'
-    runs-on: ubuntu-24.04  # 固定 24.04：ubuntu-latest 自 2026-10-19 起迁移到 Ubuntu 26.04（runner-images#14748）
+    runs-on: ubuntu-26.04  # 固定 26.04：ubuntu-latest 迁移窗口期不可控（runner-images#14748）
     steps:
       - uses: actions/checkout@v7
       - name: 📥 下载固件 Artifact
@@ -638,7 +642,7 @@ jobs:
   persist-last-build:
     needs: [check-upstream, build, qemu-smoke-test, release]
     if: needs.check-upstream.outputs.should_build == 'true' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-24.04  # 固定 24.04：ubuntu-latest 自 2026-10-19 起迁移到 Ubuntu 26.04（runner-images#14748）
+    runs-on: ubuntu-26.04  # 固定 26.04：ubuntu-latest 迁移窗口期不可控（runner-images#14748）
     steps:
       - uses: actions/checkout@v7
         with:
