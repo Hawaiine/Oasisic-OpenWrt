@@ -65,3 +65,5 @@ jobs:
               echo "   enable → HTTP $code"
             fi
           done < /tmp/wfs.txt
+
+# 触发一次 PR 事件以验证 pull_request 触发器（无功能改动）
