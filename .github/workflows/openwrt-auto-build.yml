@@ -80,6 +80,7 @@ jobs:
     runs-on: ${{ inputs.runner_image || vars.RUNNER_IMAGE || 'ubuntu-26.04' }}
     outputs:
       should_build: ${{ steps.check.outputs.should_build }}
+      artifact_name: ${{ steps.check.outputs.artifact_name }}
       owrt_version: ${{ steps.check.outputs.owrt_version }}
       owrt_ver_safe: ${{ steps.check.outputs.owrt_ver_safe }}
       kernel_version: ${{ steps.check.outputs.kernel_version }}
@@ -94,6 +95,7 @@ jobs:
         id: check
         run: |
           SAVED=$(cat ${{ env.LAST_VERSION_FILE }} 2>/dev/null || echo "none")
+          EVENT_NAME="${{ github.event_name }}"
 
           # ── OpenWrt latest tag ──
           OWRT_TAG=$(curl -sL "https://api.github.com/repos/${{ env.OWRT_REPO }}/releases/latest" \
@@ -102,6 +104,14 @@ jobs:
 
           OWRT_SAFE="${OWRT_TAG#v}"
           echo "owrt_ver_safe=$OWRT_SAFE" >> "$GITHUB_OUTPUT"
+
+          # Artifact 名：PR 构建加 -pr<编号>，避免和正式件同名，下载区一眼能分
+          ARTIFACT_NAME="oasisic-openwrt-${OWRT_SAFE}"
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            ARTIFACT_NAME="${ARTIFACT_NAME}-pr${{ github.event.pull_request.number }}"
+          fi
+          echo "artifact_name=$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
+          echo "📦 Artifact 名: $ARTIFACT_NAME"
 
           # ── 内核版本（仅展示，不作为 should_build 信号） ──
           KERNEL_VER=$(curl -sL "https://www.kernel.org/releases.json" \
@@ -147,7 +157,6 @@ jobs:
 
           # ── should_build 判定 ──
           FORCE_BUILD="${{ inputs.force_build }}"
-          EVENT_NAME="${{ github.event_name }}"
           # PR 验证构建：忽略 last_build_version 去重，保证每次 PR 都真编
           if [ "$FORCE_BUILD" = "true" ] || [ "$EVENT_NAME" = "pull_request" ]; then
             echo "should_build=true" >> "$GITHUB_OUTPUT"
@@ -434,10 +443,17 @@ jobs:
           echo "${{ needs.check-upstream.outputs.owrt_version }}_nikki-${{ needs.check-upstream.outputs.nikki_sha }}" \
             > "${{ env.LAST_VERSION_FILE }}"
 
+      - name: 📝 产物下载入口写入 Summary
+        run: |
+          echo "### 📥 固件下载" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Run 页面 Artifacts：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}#artifacts" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Artifact 名：\`${{ needs.check-upstream.outputs.artifact_name }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 命令行：\`gh run download ${{ github.run_id }} -n ${{ needs.check-upstream.outputs.artifact_name }}\`" >> "$GITHUB_STEP_SUMMARY"
+
       - name: 📤 上传固件 Artifact
         uses: actions/upload-artifact@v7
         with:
-          name: oasisic-openwrt-${{ needs.check-upstream.outputs.owrt_ver_safe }}
+          name: ${{ needs.check-upstream.outputs.artifact_name }}
           path: |
             ${{ env.BUILD_DIR }}/bin/targets/x86/64/openwrt-x86-64-generic-squashfs-combined-efi.img.gz
             ${{ env.BUILD_DIR }}/bin/targets/x86/64/openwrt-x86-64-generic-squashfs-combined.img.gz
@@ -460,7 +476,7 @@ jobs:
       - name: 📥 下载固件 Artifact
         uses: actions/download-artifact@v7
         with:
-          name: oasisic-openwrt-${{ needs.check-upstream.outputs.owrt_ver_safe }}
+          name: ${{ needs.check-upstream.outputs.artifact_name }}
           path: firmware/
 
       - name: 🚀 QEMU 烟雾测试
@@ -586,7 +602,7 @@ jobs:
       - name: 📥 下载固件 Artifact
         uses: actions/download-artifact@v7
         with:
-          name: oasisic-openwrt-${{ needs.check-upstream.outputs.owrt_ver_safe }}
+          name: ${{ needs.check-upstream.outputs.artifact_name }}
           path: release-artifacts/
 
       - name: 🏷️ 生成 Release body
@@ -684,6 +700,59 @@ jobs:
         run: |
           rm -f release-body.md
           rm -rf release-artifacts
+
+  # ─── Job 4.5: PR 验证件发 prerelease（仅 PR 全量构建） ─────────────────
+  # 目的：PR 里编出来的固件可以直接下载刷机测试，又不混进正式 Release
+  ci-prerelease:
+    needs: [check-upstream, build, qemu-smoke-test]
+    if: github.event_name == 'pull_request' && needs.check-upstream.outputs.should_build == 'true'
+    runs-on: ${{ inputs.runner_image || vars.RUNNER_IMAGE || 'ubuntu-26.04' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 📥 下载固件 Artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ needs.check-upstream.outputs.artifact_name }}
+          path: pr-artifacts/
+
+      - name: 🏷️ 计算 prerelease tag
+        id: tag
+        run: |
+          TAG="ci-${{ needs.check-upstream.outputs.owrt_ver_safe }}-pr${{ github.event.pull_request.number }}-r${{ github.run_number }}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "### 🧪 PR 验证件" >> "$GITHUB_STEP_SUMMARY"
+          echo "- tag：\`$TAG\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 直链：${{ github.server_url }}/${{ github.repository }}/releases/tag/$TAG" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 🚀 发布 prerelease（不覆盖 latest）
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: 🧪 PR 验证件 ${{ needs.check-upstream.outputs.owrt_ver_safe }} (PR #${{ github.event.pull_request.number }})
+          prerelease: true
+          make_latest: false
+          generate_release_notes: false
+          body: |
+            ## 🧪 PR 验证件（非正式发布）
+
+            | 项 | 值 |
+            |----|-----|
+            | OpenWrt | ${{ needs.check-upstream.outputs.owrt_version }} |
+            | Nikki | ${{ needs.check-upstream.outputs.nikki_tag }}（${{ needs.check-upstream.outputs.nikki_short_sha }}） |
+            | Runner | ${{ inputs.runner_image || vars.RUNNER_IMAGE || 'ubuntu-26.04' }} |
+            | PR | #${{ github.event.pull_request.number }} |
+            | 触发 | ${{ github.event.pull_request.html_url }} |
+
+            仅供 PR 验证刷机测试，**不是正式版**；正式版走 main 的自动构建。
+          files: |
+            pr-artifacts/**/*.img.gz
+            pr-artifacts/**/*.iso
+            pr-artifacts/**/sha256sums
+            pr-artifacts/**/sha256sums.minisig
+            pr-artifacts/**/config.buildinfo
+            pr-artifacts/**/profiles.json
+            pr-artifacts/**/feeds.conf.default
 
   # ─── Job 5: 回写 last_build_version（持久化） ──────────────────────────
   persist-last-build:
