@@ -216,19 +216,21 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ccache-openwrt-${{ needs.check-upstream.outputs.owrt_ver_safe }}-${{ hashFiles('scripts/gen-config.sh') }}
+          # 镜像必须进 key：ccache 产物与宿主编译器版本强相关
+          key: ccache-openwrt-${{ needs.check-upstream.outputs.owrt_ver_safe }}-${{ inputs.runner_image || vars.RUNNER_IMAGE || 'ubuntu-26.04' }}-${{ hashFiles('scripts/gen-config.sh') }}
           restore-keys: |
-            ccache-openwrt-${{ needs.check-upstream.outputs.owrt_ver_safe }}-
-            ccache-openwrt-
+            ccache-openwrt-${{ needs.check-upstream.outputs.owrt_ver_safe }}-${{ inputs.runner_image || vars.RUNNER_IMAGE || 'ubuntu-26.04' }}-
 
       - name: 💾 恢复源码树缓存
         id: source-cache
         uses: actions/cache@v5
         with:
           path: ${{ env.BUILD_DIR }}
-          key: source-openwrt-${{ needs.check-upstream.outputs.owrt_ver_safe }}-${{ hashFiles('scripts/gen-config.sh') }}
+          # 镜像必须进 key，且不做前缀回退：源码树里含 staging_dir/host 等构建态，
+          # 跨镜像/跨 config 的部分恢复会让 make 误判"工具已编好"（#210 即因此失败）
+          key: source-openwrt-${{ needs.check-upstream.outputs.owrt_ver_safe }}-${{ inputs.runner_image || vars.RUNNER_IMAGE || 'ubuntu-26.04' }}-${{ hashFiles('scripts/gen-config.sh') }}
           restore-keys: |
-            source-openwrt-${{ needs.check-upstream.outputs.owrt_ver_safe }}-
+            source-openwrt-${{ needs.check-upstream.outputs.owrt_ver_safe }}-${{ inputs.runner_image || vars.RUNNER_IMAGE || 'ubuntu-26.04' }}-
 
       - name: 💾 恢复 dl 缓存
         uses: actions/cache@v5
@@ -236,10 +238,28 @@ jobs:
           path: |
             ${{ env.BUILD_DIR }}/dl
             ${{ env.BUILD_DIR }}/feeds
+          # dl 只是源码包 tarball，跨镜像复用安全，故不带镜像维度
           key: dl-openwrt-${{ needs.check-upstream.outputs.owrt_ver_safe }}-${{ needs.check-upstream.outputs.nikki_sha }}-${{ hashFiles('scripts/gen-config.sh') }}
           restore-keys: |
             dl-openwrt-${{ needs.check-upstream.outputs.owrt_ver_safe }}-
             dl-openwrt-
+
+      - name: 🧪 源码树缓存一致性自检
+        run: |
+          set +e
+          HOSTBIN="${{ env.BUILD_DIR }}/staging_dir/host/bin"
+          if [ -d "${{ env.BUILD_DIR }}/staging_dir" ]; then
+            if "$HOSTBIN/python3" --version >/dev/null 2>&1; then
+              echo "✅ 继承的 host 工具链可用：$("$HOSTBIN/python3" --version 2>&1)"
+            else
+              echo "⚠️ 继承的 host 工具链不可用（多为跨镜像/跨 config 缓存污染），清理后重建"
+              rm -rf "${{ env.BUILD_DIR }}/staging_dir/host" "${{ env.BUILD_DIR }}/build_dir/host"
+              rm -rf "${{ env.BUILD_DIR }}/tmp/stamp"
+            fi
+          else
+            echo "ℹ️ 无源码树缓存，属冷构建"
+          fi
+          set -e
 
       - name: ⬇️ 克隆 OpenWrt 源码（自动重试）
         if: steps.source-cache.outputs.cache-hit != 'true'
