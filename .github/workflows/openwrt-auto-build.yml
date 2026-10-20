@@ -768,6 +768,7 @@ jobs:
           files: |
             pr-artifacts/**/*.img.gz
             pr-artifacts/**/*.iso
+            pr-artifacts/**/*.manifest
             pr-artifacts/**/sha256sums
             pr-artifacts/**/sha256sums.minisig
             pr-artifacts/**/config.buildinfo
