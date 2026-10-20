@@ -1,10 +1,23 @@
 #!/usr/bin/env python3
-"""Oasisic-OpenWrt → Discord 🖥️・固件发布 通知"""
-import os, json, sys, subprocess
+"""Oasisic-OpenWrt → Discord 🖥️・固件发布 通知
+
+优先用 Discord Components V2（Container / TextDisplay / Section / 链接按钮）发送，
+服务端不接受（400/403）时自动回退到旧 embed 结构，保证通知不丢。
+"""
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta, timezone
 
-# Asia/Shanghai UTC+8
+API = "https://discord.com/api/v10"
+UA = "Oasisic-OpenWrt-CI/2.0 (+https://github.com/Hawaiine/Oasisic-OpenWrt)"
 BJ_TZ = timezone(timedelta(hours=8))
+
+# Oasisic 品牌蓝；V2 容器左侧强调色 / embed 回退色一致
+ACCENT = 0x58B4FF
+LOGO = "https://raw.githubusercontent.com/openwrt/branding/master/logo/openwrt_logo_square_blue_and_dark_blue.png"
 
 channel_id = os.environ.get("DISCORD_CHANNEL_ID", "1524181167270531303")
 token = os.environ.get("DISCORD_TOKEN", "")
@@ -12,80 +25,135 @@ if not token:
     print("❌ DISCORD_TOKEN 未设置", file=sys.stderr)
     sys.exit(1)
 
-# 条件构建字段
-fields = [
-    {
-        "name": "🏗️ **OpenWrt**",
-        "value": f"`{os.environ.get('OWRT_VER', '?')}`",
-        "inline": True
-    },
-    {
-        "name": "📡 **Nikki**",
-        "value": f"`{os.environ.get('NIKKI_VER', '?')}`",
-        "inline": True
-    },
-]
+owrt = os.environ.get("OWRT_VER", "?")
+nikki = os.environ.get("NIKKI_VER", "?")
+kernel = os.environ.get("KERNEL_VER", "")
+root_pass = os.environ.get("ROOT_PASS", "")
+tag = os.environ.get("TAG", "?")
+release_url = os.environ.get("RELEASE_URL", "#")
+build_time = os.environ.get("BUILD_TIME", "").strip()
+if not build_time or "$(" in build_time:
+    build_time = datetime.now(BJ_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
-# Kernel：仅当非空且非 ? 时显示
-kernel_ver = os.environ.get('KERNEL_VER', '')
-if kernel_ver and kernel_ver != '?':
-    fields.append({
-        "name": "🐧 **Kernel**",
-        "value": f"`{kernel_ver}`",
-        "inline": True
-    })
+# 副标题：只放版本号与架构，不加 "OpenWrt / Nikki / Kernel" 字样
+subtitle_bits = [b for b in (owrt, nikki) if b and b != "?"]
+if kernel and kernel != "?":
+    subtitle_bits.append(kernel)
+subtitle_bits.append("x86/64")
+SUBTITLE = " · ".join(subtitle_bits)
 
-fields.extend([
-    {
-        "name": "🏷️ **版本标签**",
-        "value": f"`{os.environ.get('TAG', '?')}`",
-        "inline": True
-    },
-    {
-        "name": "📦 **下载链接**",
-        "value": f"[🔗 前往 Release 页面]({os.environ.get('RELEASE_URL', '#')})",
-        "inline": False
-    },
-    {
-        "name": "⏱ **编译完成**",
-        "value": f"{datetime.now(BJ_TZ).strftime('%Y-%m-%d %H:%M:%S')} 北京时间",
-        "inline": False
+TITLE = "## 🏝️ Oasisic OpenWrt 固件已发布"
+
+
+# ─────────────────────────── Components V2 卡片 ───────────────────────────
+def build_v2() -> dict:
+    children = [
+        {
+            "type": 9,
+            "components": [{"type": 10, "content": f"{TITLE}\n-# {SUBTITLE}"}],
+            "accessory": {"type": 11, "media": {"url": LOGO}},
+        },
+        {"type": 14, "divider": True, "spacing": 1},
+        {
+            "type": 10,
+            "content": (
+                "### 📦 下载\n"
+                "`squashfs-combined-efi.img.gz` 推荐 · PVE UEFI\n"
+                "`squashfs-combined.img.gz` BIOS 启动\n"
+                "`image.iso` / `image-efi.iso` ISO 镜像\n"
+                "`sha256sums` + `sha256sums.minisig` 校验与签名"
+            ),
+        },
+        {
+            "type": 10,
+            "content": (
+                "### 🔑 首次登录\n"
+                f"用户 `root` · 密码 ||`{root_pass or '（见 Release 正文）'}`||\n"
+                "开机走 DHCP，IP 到主路由查看，首次访问自动进设置向导"
+            ),
+        },
+        {"type": 14, "divider": True, "spacing": 1},
+        {
+            "type": 1,
+            "components": [
+                {"type": 2, "style": 5, "label": "前往 Release 下载", "url": release_url}
+            ],
+        },
+        {
+            "type": 10,
+            "content": (
+                f"-# 🏷️ {tag}\n"
+                f"-# ⏱ {build_time} 北京时间\n"
+                "-# 🏝️ Oasisic-OpenWrt 自动构建"
+            ),
+        },
+    ]
+
+    return {"flags": 32768, "components": [{"type": 17, "accent_color": ACCENT, "components": children}]}
+
+
+# ────────────────────────────── embed 回退 ──────────────────────────────
+def build_embed() -> dict:
+    fields = [
+        {"name": "🏗️ **OpenWrt**", "value": f"`{owrt}`", "inline": True},
+        {"name": "📡 **Nikki**", "value": f"`{nikki}`", "inline": True},
+    ]
+    if kernel and kernel != "?":
+        fields.append({"name": "🐧 **Kernel**", "value": f"`{kernel}`", "inline": True})
+    fields += [
+        {"name": "🏷️ **版本标签**", "value": f"`{tag}`", "inline": True},
+        {"name": "📦 **下载链接**", "value": f"[🔗 前往 Release 页面]({release_url})", "inline": False},
+        {"name": "⏱ **编译完成**", "value": f"{build_time} 北京时间", "inline": False},
+    ]
+    return {
+        "embeds": [
+            {
+                "title": "🏝️ **Oasisic OpenWrt 固件已发布**",
+                "color": ACCENT,
+                "thumbnail": {"url": LOGO},
+                "fields": fields,
+                "footer": {
+                    "text": "Oasisic-OpenWrt · 自动构建",
+                    "icon_url": "https://avatars.githubusercontent.com/u/152380613?v=4",
+                },
+                "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+        ]
     }
-])
 
-payload = {
-    "embeds": [{
-        "title": "🏝️ **Oasisic OpenWrt 固件已发布**",
-        "color": 5814783,
-        "thumbnail": {
-            "url": "https://raw.githubusercontent.com/openwrt/branding/master/logo/openwrt_logo_square_blue_and_dark_blue.png"
-        },
-        "fields": fields,
-        "footer": {
-            "text": "Oasisic-OpenWrt · 自动构建",
-            "icon_url": "https://avatars.githubusercontent.com/u/152380613?v=4"
-        },
-        "timestamp": datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-    }]
-}
 
-# 用 subprocess 调 curl，更可靠
-cmd = [
-    "curl", "-s", "-X", "POST",
-    f"https://discord.com/api/v10/channels/{channel_id}/messages",
-    "-H", f"Authorization: Bot {token}",
-    "-H", "Content-Type: application/json",
-    "-d", json.dumps(payload)
-]
-proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+def post(payload: dict) -> tuple[int, dict]:
+    req = urllib.request.Request(
+        f"{API}/channels/{channel_id}/messages",
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+    )
+    req.add_header("Authorization", f"Bot {token}")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("User-Agent", UA)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:  # noqa: S310
+            return resp.status, json.loads(resp.read().decode("utf-8", "replace") or "{}")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", "replace")
+        try:
+            return exc.code, json.loads(body or "{}")
+        except json.JSONDecodeError:
+            return exc.code, {"message": body[:300]}
+    except urllib.error.URLError as exc:
+        return 0, {"message": str(exc)}
 
-if proc.returncode == 0:
-    result = json.loads(proc.stdout)
-    if result.get("id"):
-        print(f"✅ Discord 通知发送成功")
-    else:
-        print(f"❌ Discord 拒绝: {result.get('message', proc.stdout[:200])}")
-        sys.exit(1)
-else:
-    print(f"❌ curl 失败: {proc.stderr}")
-    sys.exit(1)
+
+status, result = post(build_v2())
+if status in (200, 201) and result.get("id"):
+    print(f"✅ Discord 通知发送成功（Components V2） message_id={result['id']}")
+    sys.exit(0)
+
+print(f"⚠️ V2 发送被拒（{status}: {result.get('message', '')}），回退 embed", file=sys.stderr)
+status2, result2 = post(build_embed())
+if status2 in (200, 201) and result2.get("id"):
+    print(f"✅ Discord 通知发送成功（embed 回退） message_id={result2['id']}")
+    sys.exit(0)
+
+print(f"❌ Discord 拒绝: {status2} {result2.get('message', '')}", file=sys.stderr)
+sys.exit(1)
