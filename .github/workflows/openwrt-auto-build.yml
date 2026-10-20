@@ -14,6 +14,7 @@ on:
       - 'scripts/**'
       - 'files/**'
       - 'feeds.conf'
+      - 'README.md'
   workflow_dispatch:
     inputs:
       force_build:
