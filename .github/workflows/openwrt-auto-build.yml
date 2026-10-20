@@ -109,6 +109,10 @@ jobs:
           ARTIFACT_NAME="oasisic-openwrt-${OWRT_SAFE}"
           if [ "$EVENT_NAME" = "pull_request" ]; then
             ARTIFACT_NAME="${ARTIFACT_NAME}-pr${{ github.event.pull_request.number }}"
+          elif [ "${GITHUB_REF_NAME:-main}" != "main" ]; then
+            # 在分支上手动 dispatch 时也要区分，否则会和正式件同名
+            BRANCH_SAFE=$(printf '%s' "${GITHUB_REF_NAME:-unknown}" | tr '/_' '--' | tr -cd 'A-Za-z0-9.-')
+            ARTIFACT_NAME="${ARTIFACT_NAME}-branch-${BRANCH_SAFE}"
           fi
           echo "artifact_name=$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
           echo "📦 Artifact 名: $ARTIFACT_NAME"
@@ -662,6 +666,7 @@ jobs:
           - **主机名**: Oasisic-OpenWrt
           - **用户名**: root
           - **密码**: \`${PW}\`
+          - **密码有效期**: 仅首次开机有效；首次配置向导完成后**请立即修改**
           - **首次开机**: DHCP 自动获取 IP（到主路由查看）
 
           ### 📦 预装组件

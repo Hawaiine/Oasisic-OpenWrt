@@ -2,9 +2,9 @@
 
 > 全自动 OpenWrt 固件构建 · 源码编译 Nikki · PVE 开箱即用
 
-[![build](https://github.com/Hawaiine/Oasisic-Openwrt/actions/workflows/openwrt-auto-build.yml/badge.svg)](https://github.com/Hawaiine/Oasisic-Openwrt/actions/workflows/openwrt-auto-build.yml)
-[![release](https://img.shields.io/github/v/release/Hawaiine/Oasisic-Openwrt?logo=github&label=release)](https://github.com/Hawaiine/Oasisic-Openwrt/releases)
-[![last commit](https://img.shields.io/github/last-commit/Hawaiine/Oasisic-Openwrt/main?logo=git&label=last%20commit)](https://github.com/Hawaiine/Oasisic-Openwrt/commits/main)
+[![build](https://github.com/Hawaiine/Oasisic-OpenWrt/actions/workflows/openwrt-auto-build.yml/badge.svg)](https://github.com/Hawaiine/Oasisic-OpenWrt/actions/workflows/openwrt-auto-build.yml)
+[![release](https://img.shields.io/github/v/release/Hawaiine/Oasisic-OpenWrt?logo=github&label=release)](https://github.com/Hawaiine/Oasisic-OpenWrt/releases)
+[![last commit](https://img.shields.io/github/last-commit/Hawaiine/Oasisic-OpenWrt/main?logo=git&label=last%20commit)](https://github.com/Hawaiine/Oasisic-OpenWrt/commits/main)
 [![OpenWrt](https://img.shields.io/github/v/release/openwrt/openwrt?logo=openwrt&label=OpenWrt&color=00b4ff)](https://openwrt.org)
 [![Nikki](https://img.shields.io/github/v/release/nikkinikki-org/OpenWrt-nikki?logo=go&label=Nikki&color=ff6600)](https://github.com/nikkinikki-org/OpenWrt-nikki)
 [![PVE](https://img.shields.io/badge/PVE-ready-570c2e?logo=proxmox)](https://www.proxmox.com)
@@ -40,13 +40,13 @@
 
 **只想用固件 —— 3 步**
 
-1. **下载**：到 [Releases](https://github.com/Hawaiine/Oasisic-Openwrt/releases) 取最新的 `*-squashfs-combined-efi.img.gz`（PVE / UEFI 推荐；传统 BIOS 用 `*-squashfs-combined.img.gz`）
+1. **下载**：到 [Releases](https://github.com/Hawaiine/Oasisic-OpenWrt/releases) 取最新的 `*-squashfs-combined-efi.img.gz`（PVE / UEFI 推荐；传统 BIOS 用 `*-squashfs-combined.img.gz`）
 2. **导入 PVE**：复制 [🖥️ PVE 导入](#️-pve-导入) 里的命令块执行即可
 3. **首次配置**：首次启动是 DHCP 客户端 —— 到主路由的 DHCP 列表找主机名 `Oasisic-OpenWrt`，浏览器打开它的 IP，按向导设置静态 IP 和管理员密码；root 密码以对应 Release 正文为准
 
-**想自己编译**：Actions → `openwrt-auto-build` → **Run workflow**；参数与示例见 [🚀 手动构建](#-手动构建workflow_dispatch)。
+**想自己编译**：Actions → `openwrt-auto-build` → **Run workflow**；当前版本已构建过时需勾选 **`force_build`**，否则会因为「版本未变化」直接跳过。参数与示例见 [🚀 手动构建](#-手动构建workflow_dispatch)。
 
-⏱ 耗时参考：冷构建约 60–100 分钟；命中缓存约 30–50 分钟（GitHub 免费 runner）。
+⏱ 耗时参考：冷构建约 90–115 分钟；命中缓存约 40–70 分钟（GitHub 免费 runner，2 核 4 线程）。
 
 ---
 
@@ -57,9 +57,9 @@
 | | |
 |---|---|
 | 🏝️ **项目** | Oasisic OpenWrt |
-| 📡 **流水线** | check-upstream → build → qemu-smoke-test → release → persist-last-build |
+| 📡 **流水线** | lint → check-upstream → build → qemu-smoke-test → release / ci-prerelease → persist-last-build（失败自动发红卡） |
 | 🎯 **上游跟踪** | OpenWrt 最新 Release Tag；Nikki 默认同最新 Release Tag，手动可覆盖为分支 / Commit |
-| ⏱ **耗时参考** | 冷构建约 60–100 分钟；缓存命中约 30–50 分钟（GitHub 免费 runner） |
+| ⏱ **耗时参考** | 冷构建约 90–115 分钟；缓存命中约 40–70 分钟（GitHub 免费 runner） |
 | 📦 **产物** | squashfs 镜像 · ISO · sha256sums · minisig · feeds.conf.default · manifest |
 
 ---
@@ -157,6 +157,12 @@ lint ─ check-upstream ─ build ─ qemu-smoke-test ─┬─ release ── p
 | `notify-failure` | 任一任务失败时发红色失败卡片（失败任务 + 失败步骤 + 日志链接） | 任一任务失败 |
 | `persist-last-build` | 回写 `last_build_version`（commit 带 `[skip ci]`） | 仅 `main` |
 
+### 运行环境
+
+- Runner 固定 **`ubuntu-26.04`**（`ubuntu-latest` 在 2026-10-19→11-19 迁移窗口内会随机漂移，不用它）
+- 如需对比验证另一镜像：手动触发时填 `runner_image`（如 `ubuntu-24.04`），不改代码
+- 26.04 差异：`qemu-system-x86-64` 包已删除（用 `qemu-system-x86`）、`libncurses5-dev` 已无正式包（用 `libncurses-dev`）
+
 ### 缓存 Key（摘要）
 
 | 缓存 | Key 要点 |
@@ -194,10 +200,11 @@ Tag/分支调试仍可用 `;v1.26.1` / `;main`。
 ## 📂 项目结构
 
 ```
-Oasisic-Openwrt/
+Oasisic-OpenWrt/
 ├── .github/
 │   ├── workflows/
-│   │   ├── openwrt-auto-build.yml   # 主构建流水线
+│   │   ├── openwrt-auto-build.yml   # 主构建流水线（正式 + PR 验证）
+│   │   ├── keepalive.yml            # 每周心跳，防 60 天无活动被停用
 │   │   └── cleanup-actions.yml      # 定时清理失败 run / 旧 cache
 │   └── minisign.pub
 ├── files/                           # 注入 rootfs 的文件
@@ -212,13 +219,14 @@ Oasisic-Openwrt/
 │   ├── check-firmware.sh
 │   ├── check-docs-consistency.sh
 │   ├── minisign-sign.sh
-│   └── notify-discord.py
-├── feeds.conf                       # 本地参考；CI 以 gen-feeds-conf 输出为准
+│   ├── notify-discord.py            # 成功卡片（Components V2）
+│   └── notify-discord-failure.py    # 失败卡片（失败任务 + 失败步骤）
+├── feeds.conf                       # 仅本地参考；CI 一律用 gen-feeds-conf.sh 生成，勿照此改
 ├── LICENSE                          # GPLv2
 └── README.md
 ```
 
-`last_build_version`：**不在仓库常驻树中保证存在**。构建成功后由 `persist-last-build` 写入/更新；删除该文件可强制下次按“无历史版本”重新构建。
+`last_build_version`：去重键，格式 `<OpenWrt tag>_nikki-<完整 SHA>`。构建成功后由 `persist-last-build` 提交更新（commit 带 `[skip ci]`）；删除该文件可强制下次按“无历史版本”重新构建。
 
 默认分支为 **`main`**。请勿长期保留与 main 分叉的临时修复分支。
 
@@ -248,7 +256,7 @@ Oasisic-Openwrt/
 
 ## 🚀 手动构建（workflow_dispatch）
 
-入口：[Actions → openwrt-auto-build → Run workflow](https://github.com/Hawaiine/Oasisic-Openwrt/actions/workflows/openwrt-auto-build.yml)
+入口：[Actions → openwrt-auto-build → Run workflow](https://github.com/Hawaiine/Oasisic-OpenWrt/actions/workflows/openwrt-auto-build.yml)
 
 | 参数 | 类型 | 默认 | 含义 |
 |------|------|------|------|
@@ -274,7 +282,7 @@ Oasisic-Openwrt/
 
 成功后：
 
-1. [Releases](https://github.com/Hawaiine/Oasisic-Openwrt/releases) 下载产物  
+1. [Releases](https://github.com/Hawaiine/Oasisic-OpenWrt/releases) 下载产物  
 2. 标签形如 `25.12.6-n31339d5`（`{OpenWrt 版本}-n{Nikki 短 SHA}`）  
 3. 正文含 root 随机密码、Nikki 提交（ref）、内核版本  
 4. 可选出现/更新 `last_build_version`（`persist-last-build` 依赖 token 可推 main）
@@ -444,7 +452,7 @@ GitHub 规则：**公开仓库在 60 天内没有仓库活动（没有新提交�
 
 ## 📜 版本与发布
 
-- **以 [Releases](https://github.com/Hawaiine/Oasisic-Openwrt/releases) 为准**，不再维护易过期的手工版本表。  
+- **以 [Releases](https://github.com/Hawaiine/Oasisic-OpenWrt/releases) 为准**，不再维护易过期的手工版本表。  
 - 标签格式：`{OpenWrt版本号}-n{Nikki 短SHA}`，例如 `25.12.6-n31339d5`；PR 验证件为 `ci-{版本号}-pr{PR号}-r{run号}`。  
 - 工程变更看 `git log` / Actions；不在此逐条罗列构建编号。
 
