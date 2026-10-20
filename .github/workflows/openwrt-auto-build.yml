@@ -37,7 +37,7 @@ env:
 jobs:
   # ─── Job 1: 检测上游 ─────────────────────────────────────────────────────
   check-upstream:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04  # 固定 26.04：ubuntu-latest 迁移窗口期不可控（runner-images#14748）
     outputs:
       should_build: ${{ steps.check.outputs.should_build }}
       owrt_version: ${{ steps.check.outputs.owrt_version }}
@@ -128,7 +128,7 @@ jobs:
   build:
     needs: check-upstream
     if: needs.check-upstream.outputs.should_build == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04  # 固定 26.04：ubuntu-latest 迁移窗口期不可控（runner-images#14748）
     outputs:
       kernel_version: ${{ steps.kernel-version.outputs.kernel_version }}
       nikki_version_actual: ${{ steps.nikki-version.outputs.nikki_version_actual }}
@@ -152,7 +152,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
-            build-essential libncurses5-dev libncursesw5-dev \
+            build-essential libncurses-dev \
             zlib1g-dev gawk git gettext wget unzip python3 \
             file qemu-utils ccache genisoimage
 
@@ -160,19 +160,21 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ccache-openwrt-${{ needs.check-upstream.outputs.owrt_ver_safe }}-${{ hashFiles('scripts/gen-config.sh') }}
+          # 镜像必须进 key：ccache 产物与宿主编译器版本强相关
+          key: ccache-openwrt-${{ needs.check-upstream.outputs.owrt_ver_safe }}-ubuntu-26.04-${{ hashFiles('scripts/gen-config.sh') }}
           restore-keys: |
-            ccache-openwrt-${{ needs.check-upstream.outputs.owrt_ver_safe }}-
-            ccache-openwrt-
+            ccache-openwrt-${{ needs.check-upstream.outputs.owrt_ver_safe }}-ubuntu-26.04-
 
       - name: 💾 恢复源码树缓存
         id: source-cache
         uses: actions/cache@v5
         with:
           path: ${{ env.BUILD_DIR }}
-          key: source-openwrt-${{ needs.check-upstream.outputs.owrt_ver_safe }}-${{ hashFiles('scripts/gen-config.sh') }}
+          # 镜像必须进 key，且不做前缀回退：源码树里含 staging_dir/host 等构建态，
+          # 跨镜像/跨 config 的部分恢复会让 make 误判"工具已编好"
+          key: source-openwrt-${{ needs.check-upstream.outputs.owrt_ver_safe }}-ubuntu-26.04-${{ hashFiles('scripts/gen-config.sh') }}
           restore-keys: |
-            source-openwrt-${{ needs.check-upstream.outputs.owrt_ver_safe }}-
+            source-openwrt-${{ needs.check-upstream.outputs.owrt_ver_safe }}-ubuntu-26.04-
 
       - name: 💾 恢复 dl 缓存
         uses: actions/cache@v5
@@ -180,10 +182,28 @@ jobs:
           path: |
             ${{ env.BUILD_DIR }}/dl
             ${{ env.BUILD_DIR }}/feeds
+          # dl 只是源码包 tarball，跨镜像复用安全，故不带镜像维度
           key: dl-openwrt-${{ needs.check-upstream.outputs.owrt_ver_safe }}-${{ needs.check-upstream.outputs.nikki_sha }}-${{ hashFiles('scripts/gen-config.sh') }}
           restore-keys: |
             dl-openwrt-${{ needs.check-upstream.outputs.owrt_ver_safe }}-
             dl-openwrt-
+
+      - name: 🧪 源码树缓存一致性自检
+        run: |
+          set +e
+          HOSTBIN="${{ env.BUILD_DIR }}/staging_dir/host/bin"
+          if [ -d "${{ env.BUILD_DIR }}/staging_dir" ]; then
+            if "$HOSTBIN/python3" --version >/dev/null 2>&1; then
+              echo "✅ 继承的 host 工具链可用：$("$HOSTBIN/python3" --version 2>&1)"
+            else
+              echo "⚠️ 继承的 host 工具链不可用（多为跨镜像/跨 config 缓存污染），清理后重建"
+              rm -rf "${{ env.BUILD_DIR }}/staging_dir/host" "${{ env.BUILD_DIR }}/build_dir/host"
+              rm -rf "${{ env.BUILD_DIR }}/tmp/stamp"
+            fi
+          else
+            echo "ℹ️ 无源码树缓存，属冷构建"
+          fi
+          set -e
 
       - name: ⬇️ 克隆 OpenWrt 源码（自动重试）
         if: steps.source-cache.outputs.cache-hit != 'true'
@@ -408,7 +428,7 @@ jobs:
   qemu-smoke-test:
     needs: [check-upstream, build]
     if: needs.check-upstream.outputs.should_build == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04  # 固定 26.04：ubuntu-latest 迁移窗口期不可控（runner-images#14748）
     steps:
       - name: 📥 下载固件 Artifact
         uses: actions/download-artifact@v7
@@ -433,7 +453,37 @@ jobs:
           IMG="${FIRMWARE_GZ%.gz}"
           echo "📦 固件: $(basename "$IMG") ($(du -h "$IMG" | cut -f1))"
 
-          sudo apt-get install -y -qq qemu-system-x86-64 ovmf 2>/dev/null || true
+          # 26.04 起包名由 qemu-system-x86-64 改为 qemu-system-x86；按序回退，装不上就硬失败（禁止静默跳过）
+          for pkg in qemu-system-x86 qemu-system-x86-64 qemu-system; do
+            if sudo apt-get install -y -qq "$pkg" ovmf 2>/dev/null; then echo "✅ qemu 包: $pkg"; break; fi
+          done
+          command -v qemu-system-x86_64 >/dev/null || { echo "❌ 未安装 qemu-system-x86_64，烟雾测试无法进行"; exit 1; }
+
+          # OVMF 固件：找不到就硬失败。假绿（跳过后仍显示绿色）比失败更危险
+          # OVMF 固件：找不到就硬失败。假绿（跳过后仍显示绿色）比失败更危险
+          OVMF_CODE=""
+          for f in /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd \
+                   /usr/share/ovmf/OVMF_CODE_4M.fd /usr/share/ovmf/OVMF_CODE.fd \
+                   /usr/share/qemu/OVMF_CODE_4M.fd /usr/share/qemu/OVMF_CODE.fd; do
+            [ -f "$f" ] && OVMF_CODE="$f" && break
+          done
+          if [ -z "$OVMF_CODE" ]; then
+            OVMF_CODE="$(sudo find /usr/share -maxdepth 4 -name 'OVMF_CODE*.fd' -type f 2>/dev/null | head -1)"
+          fi
+          if [ -z "$OVMF_CODE" ]; then
+            echo "❌ 未找到 OVMF 固件：已尝试 /usr/share/{OVMF,ovmf,qemu} 及全盘搜索"
+            echo "   请确认 ovmf 包是否装成功；qemu 烟雾测试不能静默跳过"
+            exit 1
+          fi
+          echo "✅ OVMF: $OVMF_CODE"
+
+          OVMF_VARS="/tmp/ovmf_vars.fd"
+          cp "$(dirname "$OVMF_CODE")/OVMF_VARS_4M.fd" "$OVMF_VARS" 2>/dev/null || \
+            cp "$(dirname "$OVMF_CODE")/OVMF_VARS.fd" "$OVMF_VARS" 2>/dev/null || \
+            cp "$(find /usr/share -maxdepth 4 -name 'OVMF_VARS*.fd' -type f 2>/dev/null | head -1)" "$OVMF_VARS" 2>/dev/null || \
+            touch "$OVMF_VARS"
+
+
 
           OVMF_CODE=""
           for f in /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd; do
@@ -529,7 +579,7 @@ jobs:
   release:
     needs: [check-upstream, build, qemu-smoke-test]
     if: needs.check-upstream.outputs.should_build == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04  # 固定 26.04：ubuntu-latest 迁移窗口期不可控（runner-images#14748）
     steps:
       - uses: actions/checkout@v7
       - name: 📥 下载固件 Artifact
@@ -638,7 +688,7 @@ jobs:
   notify-failure:
     needs: [lint, check-upstream, build, qemu-smoke-test, release, ci-prerelease, persist-last-build]
     if: failure()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04  # 固定 26.04：ubuntu-latest 迁移窗口期不可控（runner-images#14748）
     permissions:
       contents: read
       actions: read
@@ -665,7 +715,7 @@ jobs:
   persist-last-build:
     needs: [check-upstream, build, qemu-smoke-test, release]
     if: needs.check-upstream.outputs.should_build == 'true' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04  # 固定 26.04：ubuntu-latest 迁移窗口期不可控（runner-images#14748）
     steps:
       - uses: actions/checkout@v7
         with:
