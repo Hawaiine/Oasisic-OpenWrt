@@ -522,19 +522,28 @@ jobs:
           done
           command -v qemu-system-x86_64 >/dev/null || { echo "❌ 未安装 qemu-system-x86_64，烟雾测试无法进行"; exit 1; }
 
+          # OVMF 固件：找不到就硬失败。假绿（跳过后仍显示绿色）比失败更危险
           OVMF_CODE=""
-          for f in /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd; do
+          for f in /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd \
+                   /usr/share/ovmf/OVMF_CODE_4M.fd /usr/share/ovmf/OVMF_CODE.fd \
+                   /usr/share/qemu/OVMF_CODE_4M.fd /usr/share/qemu/OVMF_CODE.fd; do
             [ -f "$f" ] && OVMF_CODE="$f" && break
           done
           if [ -z "$OVMF_CODE" ]; then
-            echo "⚠️ 未找到 OVMF，跳过 QEMU 测试"
-            exit 0
+            OVMF_CODE="$(sudo find /usr/share -maxdepth 4 -name 'OVMF_CODE*.fd' -type f 2>/dev/null | head -1)"
           fi
+          if [ -z "$OVMF_CODE" ]; then
+            echo "❌ 未找到 OVMF 固件：已尝试 /usr/share/{OVMF,ovmf,qemu} 及全盘搜索"
+            echo "   请确认 ovmf 包是否装成功；qemu 烟雾测试不能静默跳过"
+            exit 1
+          fi
+          echo "✅ OVMF: $OVMF_CODE"
 
           BOOT_LOG="/tmp/boot.log"
           OVMF_VARS="/tmp/ovmf_vars.fd"
           cp "$(dirname "$OVMF_CODE")/OVMF_VARS_4M.fd" "$OVMF_VARS" 2>/dev/null || \
             cp "$(dirname "$OVMF_CODE")/OVMF_VARS.fd" "$OVMF_VARS" 2>/dev/null || \
+            cp "$(find /usr/share -maxdepth 4 -name 'OVMF_VARS*.fd' -type f 2>/dev/null | head -1)" "$OVMF_VARS" 2>/dev/null || \
             touch "$OVMF_VARS"
 
           timeout 300 qemu-system-x86_64 \
