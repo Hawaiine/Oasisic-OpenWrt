@@ -40,7 +40,7 @@
 
 **只想用固件 —— 3 步**
 
-1. **下载**：到 [Releases](https://github.com/Hawaiine/Oasisic-OpenWrt/releases) 取最新的 `*-squashfs-combined-efi.img.gz`（PVE / UEFI 推荐；传统 BIOS 用 `*-squashfs-combined.img.gz`）
+1. **下载**：到 [Releases](https://github.com/Hawaiine/Oasisic-OpenWrt/releases) 取最新的 `*-squashfs-combined-efi.img.gz`（PVE / UEFI 推荐；传统 BIOS 用 `*-squashfs-combined.img.gz`）。**若 Releases 为空**，说明产物已清理，按下面的「想自己编译」跑一次即可生成
 2. **导入 PVE**：复制 [🖥️ PVE 导入](#️-pve-导入) 里的命令块执行即可
 3. **首次配置**：首次启动是 DHCP 客户端 —— 到主路由的 DHCP 列表找主机名 `Oasisic-OpenWrt`，浏览器打开它的 IP，按向导设置静态 IP 和管理员密码；root 密码以对应 Release 正文为准
 
@@ -69,10 +69,13 @@
 | 类别 | 说明 |
 |------|------|
 | 🏗️ 全量 SDK | 从 OpenWrt 源码编译，Nikki / mihomo-meta / luci-app-nikki 由 feeds 源码集成 |
-| 🔄 定时 + 手动 | 每天北京时间 14:00 检测上游；Actions 可手动 `force_build` / `nikki_ref` |
+| 🔄 定时 + 手动 | 每天 UTC 06:00（北京 14:00）检测上游，GitHub 排队常延到北京 18:00–22:30；Actions 可手动 `force_build` / `nikki_ref` / `runner_image` |
 | 📌 Nikki 钉定 | 解析 Tag/分支/短 SHA → 完整 40 位 SHA；feeds 使用 `url^SHA`（Commit）或 `url;Tag/分支` |
 | 🏷️ Release 命名 | `{OpenWrt版本}-n{Nikki短SHA}`（如 `25.12.6-n31339d5`），同版本不同 Nikki 提交可共存 |
-| 🧪 QEMU 门禁 | 启动固件，检查 LuCI HTTP 与 JS 资源 |
+| 🧪 QEMU 门禁 | 启动固件，检查 LuCI 返回 200 与 JS 资源非 gzip；qemu/OVMF 缺失直接失败（不再“绿着跳过”） |
+| 🔬 PR 验证 | 改 workflow / scripts / files 的 PR 自动跑 lint；打 `ci:full-build` 标签跑全量编译，产物走 `ci-*` prerelease |
+| 🔔 通知 | 成功/失败都发 Discord 卡片（Components V2）；失败卡片直接列出失败任务与失败步骤 |
+| 💓 保活 | `keepalive.yml` 每周提交一次心跳，防 60 天无活动被 GitHub 停用 schedule |
 | 🔏 minisign | 对 `sha256sums` 签名，Release 附带 `sha256sums.minisig`（公钥见 `.github/minisign.pub`） |
 | 🖥️ PVE | qemu-ga + virtio 驱动；默认 LAN DHCP，无硬编码局域网 IP |
 | 🧭 首次向导 | 纯 HTML/CSS/JS + CGI；完成后自禁用 |
@@ -142,8 +145,9 @@ uci set luci.diag.route='119.29.29.29'
 ### 八个任务（正式构建与 PR 验证共用一条流水线）
 
 ```text
-lint ─ check-upstream ─ build ─ qemu-smoke-test ─┬─ release ── persist-last-build
-                                                 └─ ci-prerelease（仅 PR）
+lint ─ check-upstream ─ build ─ qemu-smoke-test ─┬─ release ── persist-last-build（仅 main）
+                                                 ├─ ci-prerelease（仅 PR）
+                                                 └─ notify-failure（任一步失败）
 ```
 
 | 任务 | 作用 | 何时运行 |
@@ -156,6 +160,8 @@ lint ─ check-upstream ─ build ─ qemu-smoke-test ─┬─ release ── p
 | `ci-prerelease` | 发 `ci-*` prerelease 直链，便于刷机测试 | 仅 PR |
 | `notify-failure` | 任一任务失败时发红色失败卡片（失败任务 + 失败步骤 + 日志链接） | 任一任务失败 |
 | `persist-last-build` | 回写 `last_build_version`（commit 带 `[skip ci]`） | 仅 `main` |
+
+**通知**：成功/失败卡片都发到 Discord「🖥️・固件发布」频道。失败卡片会列出失败任务与失败步骤，并附「查看运行日志」按钮；缺 `DISCORD_BOT_TOKEN` 时通知步骤跳过，不影响构建本身。
 
 ### 运行环境
 
@@ -192,7 +198,7 @@ OpenWrt `scripts/feeds`：
 src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git^<40位SHA>
 ```
 
-Tag/分支调试仍可用 `;v1.26.1` / `;main`。  
+Tag/分支调试仍可用 `;v1.26.2` / `;main`。  
 **不要**把完整 SHA 写成 `;SHA`（会报 `Remote branch … not found`）。
 
 ---
@@ -206,6 +212,7 @@ Oasisic-OpenWrt/
 │   │   ├── openwrt-auto-build.yml   # 主构建流水线（正式 + PR 验证）
 │   │   ├── keepalive.yml            # 每周心跳，防 60 天无活动被停用
 │   │   └── cleanup-actions.yml      # 定时清理失败 run / 旧 cache
+│   ├── keepalive                      # 每周心跳时间戳（首次运行后生成）
 │   └── minisign.pub
 ├── files/                           # 注入 rootfs 的文件
 │   ├── etc/config/                  # network / firewall / system / dhcp
@@ -222,6 +229,7 @@ Oasisic-OpenWrt/
 │   ├── notify-discord.py            # 成功卡片（Components V2）
 │   └── notify-discord-failure.py    # 失败卡片（失败任务 + 失败步骤）
 ├── feeds.conf                       # 仅本地参考；CI 一律用 gen-feeds-conf.sh 生成，勿照此改
+├── last_build_version               # 去重键（构建后由 persist-last-build 提交更新）
 ├── LICENSE                          # GPLv2
 └── README.md
 ```
@@ -238,9 +246,9 @@ Oasisic-OpenWrt/
 
 | 触发方式 | OpenWrt | Nikki | 说明 |
 |----------|---------|-------|------|
-| **定时自动**（每天北京时间 14:00 / UTC 06:00） | 始终 `openwrt/openwrt` 的 **`releases/latest`** | **`OpenWrt-nikki` 的 `releases/latest` Tag** | `nikki_ref` 输入为空；再解析成完整 SHA，feeds 写 `url^完整SHA` |
+| **定时自动**（cron UTC 06:00 / 北京 14:00，实际常延后到北京 18:00–22:30） | 始终 `openwrt/openwrt` 的 **`releases/latest`** | **`OpenWrt-nikki` 的 `releases/latest` Tag** | `nikki_ref` 输入为空；再解析成完整 SHA，feeds 写 `url^完整SHA` |
 | **手动 · `nikki_ref` 留空** | 同上，**仍是 latest Tag** | 同上，**与定时相同** | 适合「策略不变，只想再跑一遍」 |
-| **手动 · 填写 `nikki_ref`** | 同上，**仍是 latest Tag** | **你填的 Tag / 分支 / Commit** | 例如 `f06b6b44`、`main`、`v1.26.1` |
+| **手动 · 填写 `nikki_ref`** | 同上，**仍是 latest Tag** | **你填的 Tag / 分支 / Commit** | 例如 `v1.26.2`、`main`、`31339d5` |
 | **`force_build=true`** | 不改变选版 | 不改变选版 | 只强制编译，忽略「版本没变就跳过」 |
 | **PR 触发**（改 workflow / scripts / files） | 同上，**仍是 latest Tag** | 同上 | 默认只跑 `lint`；打 `ci:full-build` 标签才全量编译，产物走 prerelease |
 
@@ -248,7 +256,7 @@ Oasisic-OpenWrt/
 
 1. **OpenWrt 目前没有手动版本参数**：定时和手动都跟官方 **最新 Release Tag**；不能在 Actions UI 里改 OpenWrt 版本（除非以后加 input）。
 2. **Nikki 仅有新 Commit、尚未发新 Tag 时**：定时 **不会** 自动带上该 Commit；要吃到它，必须 **手动** 填 `nikki_ref`（并常勾 `force_build`）。
-3. **包管理器里显示的 Nikki 版本号** 仍可能是 Tag 名（如 1.26.1）；以 Release 正文的 **Nikki ref** 和产物里 `feeds.conf.default` 的 `^完整SHA` 为准。
+3. **包管理器里显示的 Nikki 版本号** 仍可能是 Tag 名（如 1.26.2）；以 Release 正文的 **Nikki ref** 和产物里 `feeds.conf.default` 的 `^完整SHA` 为准。
 4. **是否真的开编**：还看仓库里是否有 `last_build_version`、是否与  
    `{OpenWrtTag}_nikki-{完整SHA}` 相同；相同且未 force 则会跳过。
 
@@ -266,16 +274,16 @@ Oasisic-OpenWrt/
 
 **`nikki_ref` 规范**
 
-- 留空 → 最新 Release Tag（与定时相同，例如 `v1.26.1`）
-- Tag → `v1.26.1`
+- 留空 → 最新 Release Tag（与定时相同，例如 `v1.26.2`）
+- Tag → `v1.26.2`
 - 分支 → `main`
-- Commit → `f06b6b44` 或 40 位完整 SHA（界面可短，CI 解析为完整 SHA 再写 feeds）
+- Commit → 7 位短 SHA（如 `31339d5`）或 40 位完整 SHA（界面可短，CI 解析为完整 SHA 再写 feeds）
 
 **示例**
 
 | 目的 | force_build | nikki_ref | 实际编到的版本（逻辑） |
 |------|-------------|-----------|------------------------|
-| 钉死某 Commit 验证 | true | `f06b6b44` | OpenWrt = latest Tag；Nikki = 该 Commit |
+| 钉死某 Commit 验证 | true | `31339d5` | OpenWrt = latest Tag；Nikki = 该 Commit |
 | 跟踪 Nikki main | true | `main` | OpenWrt = latest Tag；Nikki = main HEAD |
 | 与定时相同策略手动重跑 | 按需 | 留空 | OpenWrt + Nikki 均为各自 latest Tag |
 | 强制重编当前 latest（清缓存后等） | true | 留空 | 同上，但不因 last_build 相同而跳过 |
@@ -320,6 +328,7 @@ Oasisic-OpenWrt/
 | `MINISIGN_SECRET_KEY` | 签名私钥（hex） |
 | `MINISIGN_KEY_ID` | 密钥 ID（hex） |
 | `MINISIGN_PASSWORD` | 私钥密码 |
+| `GITHUB_TOKEN` | GitHub 自动提供，无需手工配置；`persist-last-build` 用它提交去重键 |
 
 签名文件 `sha256sums.minisig` 随 Release 一并发布；公钥见 [`.github/minisign.pub`](.github/minisign.pub)。
 
@@ -362,7 +371,7 @@ qm start 100
 ## ❓ 常见问题（FAQ）
 
 **1. 多久构建一次？会不会重复编译？**  
-每天北京时间 14:00 检测一次上游。合成键 `{OpenWrtTag}_nikki-{完整SHA}` 与仓库里的 `last_build_version` 相同、且未勾 `force_build` 时直接跳过。
+cron 设为每天 UTC 06:00（北京 14:00），GitHub 的免费 runner 排队常使其在北京 18:00–22:30 才起跑。合成键 `{OpenWrtTag}_nikki-{完整SHA}` 与仓库里的 `last_build_version` 相同、且未勾 `force_build` 时直接跳过。
 
 **2. 上游发了新版，为什么没有新 Release？**  
 三种常见情况：① Nikki 只推了新 commit、还没打新 Tag —— 定时只跟 Tag，需手动填 `nikki_ref`；② 判定为「无变化」（去重生效）；③ 构建真的失败 —— 去 Actions 看那次运行的日志。
