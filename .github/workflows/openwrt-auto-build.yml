@@ -786,7 +786,7 @@ jobs:
 
   # ─── Job 4.7: 失败通知（任何 job 红都发一张红卡） ──────────────────────
   notify-failure:
-    needs: [lint, check-upstream, build, qemu-smoke-test, release, ci-prerelease]
+    needs: [lint, check-upstream, build, qemu-smoke-test, release, ci-prerelease, persist-last-build]
     if: failure()
     runs-on: ${{ inputs.runner_image || vars.RUNNER_IMAGE || 'ubuntu-26.04' }}
     permissions:
