@@ -206,6 +206,18 @@ with open('$IMG','rb') as f:
                 check "固件: $CHK 存在" $([ -f "$TMP2/$CHK" ] || [ -d "$TMP2/$CHK" ]; echo $?) warn
             done
 
+            # 检查 99-custom 脚本内容（语言注册 + 诊断地址 + 清理确认）
+            CUSTOM_SCRIPT="$TMP2/etc/uci-defaults/99-custom"
+            if [ -f "$CUSTOM_SCRIPT" ]; then
+                for DIAG_KEY in "luci.diag.dns='119.29.29.29'" "luci.diag.ping='119.29.29.29'" "luci.diag.route='119.29.29.29'"; do
+                    check "99-custom: 包含 $DIAG_KEY" $(grep -cq "$DIAG_KEY" "$CUSTOM_SCRIPT"; echo $?)
+                done
+                check "99-custom: 已清理 luci.title.title（不存在）" $(! grep -cq "luci.title.title" "$CUSTOM_SCRIPT"; echo $?) warn
+            else
+                echo "  ⚠️  99-custom 脚本不在固件中（可能被其他 uci-defaults 脚本替代）"
+                WARN=$((WARN + 1))
+            fi
+
             rm -rf "$TMP2"
         else
             echo "  ⚠️  无法确定 squashfs 分区偏移"
