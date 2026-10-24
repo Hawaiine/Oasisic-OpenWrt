@@ -76,7 +76,7 @@
 | 🔬 PR 验证 | 改 workflow / scripts / files 的 PR 自动跑 lint；打 `ci:full-build` 标签跑全量编译，产物走 `ci-*` prerelease |
 | 🔔 通知 | 成功/失败都发 Discord 卡片（Components V2）；失败卡片直接列出失败任务与失败步骤 |
 | 💓 保活 | `keepalive.yml` 每周提交一次心跳，防 60 天无活动被 GitHub 停用 schedule |
-| 🔏 minisign | 对 `sha256sums` 签名，Release 附带 `sha256sums.minisig`（公钥见 `.github/minisign.pub`） |
+| 🔏 minisign | 对 `sha256sums` 签名，Release 附带 `sha256sums.minisig`；CI 自检会用官方 minisign 验签（公钥见 `.github/minisign.pub`） |
 | 🖥️ PVE | qemu-ga + virtio 驱动；默认 LAN DHCP，无硬编码局域网 IP |
 | 🧭 首次向导 | 纯 HTML/CSS/JS + CGI；完成后自禁用 |
 | 🈴 中文 LuCI | `99-custom` 注册 `luci.languages.zh_cn`（规避 openwrt#16987） |
@@ -152,7 +152,7 @@ lint ─ qemu-env ─ check-upstream ─ build ─ qemu-smoke-test ─┬─ rel
 
 | 任务 | 作用 | 何时运行 |
 |------|------|----------|
-| `lint` | `bash -n` / `py_compile` / workflow YAML / feeds 分隔符契约 | 所有 PR 与手动触发 |
+| `lint` | `bash -n` / `py_compile` / workflow YAML / minisign 签名自检 / feeds 分隔符契约 | 所有 PR 与手动触发 |
 | `qemu-env` | 在 runner 上真装一遍 QEMU/OVMF 并打印版本（镜像/包名漂移早暴露） | 总是（约 1.5 分钟） |
 | `qemu-env` | 在 runner 上真装一遍 QEMU/OVMF 并打印版本（镜像/包名漂移早暴露） | 总是（约 1.5 分钟） |
 | `check-upstream` | 解析 OpenWrt latest tag、Nikki ref → 完整 SHA；与 `last_build_version` 比对 | 总是 |
@@ -332,12 +332,25 @@ Oasisic-OpenWrt/
 | Secret | 用途 |
 |--------|------|
 | `DISCORD_BOT_TOKEN` | 发布通知（可选，缺则通知步骤失败但不影响你本地使用固件逻辑） |
-| `MINISIGN_SECRET_KEY` | 签名私钥（hex） |
-| `MINISIGN_KEY_ID` | 密钥 ID（hex） |
-| `MINISIGN_PASSWORD` | 私钥密码 |
+| `MINISIGN_SECRET_KEY` | 签名私钥 seed（32 字节 hex，64 个字符） |
+| `MINISIGN_KEY_ID` | 密钥 ID（8 字节 hex，16 个字符） |
 | `GITHUB_TOKEN` | GitHub 自动提供，无需手工配置；`persist-last-build` 用它提交去重键 |
 
 签名文件 `sha256sums.minisig` 随 Release 一并发布；公钥见 [`.github/minisign.pub`](.github/minisign.pub)。
+
+签名用 `python3 + pynacl` 直接复刻 minisign 语义（不是调官方二进制，因为 Secrets 里存的是
+裸 seed 而非 minisign 加密密钥文件）。签名前会校验「seed 派生出的公钥」与
+`.github/minisign.pub` 一致，不一致直接失败——否则签出来的固件没人能验证。
+
+验证已发布固件：
+
+```bash
+minisign -V -m sha256sums -x sha256sums.minisig -p minisign.pub
+```
+
+`lint` 任务里有 `scripts/test-minisign-sign.sh` 自检：用临时密钥签一份假 `sha256sums`，
+再拿**官方 minisign 二进制**验签，并检查篡改后必须验签失败。这类「格式看起来对但验不过」
+的错误以前会一路绿灯到用户手上。
 
 ---
 

@@ -67,6 +67,14 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq python3-yaml
           python3 -c "import glob,yaml; [print('✅', p) or yaml.safe_load(open(p, encoding='utf-8')) for p in sorted(glob.glob('.github/workflows/*.yml'))]"
+      - name: 🔏 签名自检（产出的 .minisig 必须能被官方 minisign 验证）
+        run: |
+          set -e
+          # 用临时密钥签一份假 sha256sums，再拿官方 minisign 二进制验签。
+          # 2026-10-24 的废签名（缺 2 字节前缀 + 全局签名顺序错）CI 全程绿灯，
+          # 用户下载后才发现验不过；这道检查把这类错挡在合并前。
+          python3 -m pip install --quiet pynacl
+          bash scripts/test-minisign-sign.sh
       - name: 🔗 feeds 分隔符契约（40 位 sha 用 ^，tag 用 ;）
         run: |
           set -e
@@ -471,9 +479,9 @@ jobs:
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
           MINISIGN_KEY_ID: ${{ secrets.MINISIGN_KEY_ID }}
-          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
         run: |
-          pip install pynacl -q
+          # 新镜像不再自带 pip 命令，且 PEP 668 会拦系统级安装；用 -m + --break-system-packages
+          python3 -m pip install --quiet --break-system-packages pynacl
           bash scripts/minisign-sign.sh "${{ env.BUILD_DIR }}/bin/targets/x86/64/sha256sums"
 
       - name: 📋 展示编译产物
