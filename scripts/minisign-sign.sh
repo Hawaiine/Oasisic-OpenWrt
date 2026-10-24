@@ -104,6 +104,21 @@ if os.path.isfile(pub_path):
 else:
     print(f"⚠️  未找到公钥文件 {pub_path}，跳过自校验")
 
+# ── 先清掉 sha256sums 里对本签名的自引用行，再算摘要 ──────────────────
+# OpenWrt 生成 sha256sums 时会把目录里已有的 sha256sums.minisig 也收录进去。
+# 用了源码树缓存时，那个 minisig 是上一轮构建的残留，我们随后覆盖它，
+# 于是这一行的哈希必然对不上 → 用户跑 `sha256sum -c` 会看到
+# "sha256sums.minisig: FAILED"，误以为文件被篡改。
+# 而且这是自引用：签名不能包含自己的哈希，永远不可能自洽。
+# 官方 OpenWrt 发布物里也没有这一行（实测官方 sha256sums 0 条 minisig）。
+# 注意：必须在计算 digest 之前删，否则签的是含自引用行的旧内容。
+sums_lines = open(sums_path, encoding="utf-8").read().splitlines(keepends=True)
+kept = [l for l in sums_lines if not l.rstrip().endswith("*sha256sums.minisig")]
+if len(kept) != len(sums_lines):
+    with open(sums_path, "w", encoding="utf-8") as fh:
+        fh.writelines(kept)
+    print(f"🧹 已从 sha256sums 移除 {len(sums_lines) - len(kept)} 行自引用（*sha256sums.minisig）")
+
 # ── 签名 ──────────────────────────────────────────────────────────────
 # minisign 默认走 prehashed 模式：先 blake2b-512(文件内容)，再对摘要做 Ed25519
 digest = hashlib.blake2b(open(sums_path, "rb").read(), digest_size=64).digest()

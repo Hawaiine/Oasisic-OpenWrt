@@ -33,7 +33,12 @@ PY
 mkdir -p "$WORK/.github"
 printf 'untrusted comment: minisign public key for self-test\n%s\n' "$PUB_B64" \
   > "$WORK/.github/minisign.pub"
-printf 'abc123  test.img.gz\ndef456  test.iso\n' > "$WORK/sha256sums"
+
+# 故意混入一条「对 sha256sums.minisig 自身的引用」，模拟用了源码树缓存时
+# OpenWrt 把上一轮残留 minisig 的哈希写进 sha256sums 的情形。
+# 不处理的话用户 `sha256sum -c` 会看到 "sha256sums.minisig: FAILED"，
+# 误以为文件被篡改（自引用，永远不可能自洽）。
+printf 'abc123  test.img.gz\ndef456  test.iso\ndeadbeef  *sha256sums.minisig\n' > "$WORK/sha256sums"
 
 echo "◆ 临时密钥已生成（keyid ${KID}）"
 
@@ -66,6 +71,12 @@ lines = open(f"{work}/sha256sums.minisig").read().splitlines()
 assert len(lines) == 4, f"签名文件应为 4 行，实际 {len(lines)}"
 assert lines[0].startswith("untrusted comment: "), "第 1 行必须是 untrusted comment"
 assert lines[2].startswith("trusted comment: "), "第 3 行必须是 trusted comment"
+
+# sha256sums 里不能再有对本签名的自引用行，否则用户 `sha256sum -c` 必然报 FAILED
+sums_text = open(f"{work}/sha256sums").read()
+assert "sha256sums.minisig" not in sums_text, (
+    "sha256sums 里仍有 *sha256sums.minisig 自引用行——用户校验时会误报文件被篡改"
+)
 
 blob = base64.b64decode(lines[1])
 assert len(blob) == 74, f"签名 blob 应为 74 字节（2 alg + 8 keyid + 64 sig），实际 {len(blob)}"
