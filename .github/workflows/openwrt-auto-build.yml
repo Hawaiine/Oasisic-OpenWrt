@@ -87,6 +87,11 @@ jobs:
           grep -q 'OpenWrt-nikki.git;v1.26.2' /tmp/f2 || { echo "❌ tag 未用 ;"; exit 1; }
           echo "✅ feeds 分隔符契约成立"
 
+      - name: 🧹 保留策略自检（清理会删数据，先证明决策逻辑对）
+        run: |
+          set -e
+          bash scripts/test-prune-releases.sh
+
       - name: 📦 发布清单契约（release-assets.txt 是唯一真源）
         run: |
           set -e
@@ -133,6 +138,14 @@ jobs:
           PR_GLOB="$PR_GLOB/**"
           grep -qF "$PR_GLOB" "$WF" \
             && { echo "❌ workflow 里仍有硬编码的 prerelease glob（$PR_GLOB），应改为从 release-assets.txt 生成"; exit 1; } || true
+
+          # 保留策略护栏：清理 workflow 必须存在、必须默认 dry-run、脚本必须带 tag 模式约束
+          [ -f .github/workflows/prune-releases.yml ] \
+            || { echo "❌ 缺少 prune-releases.yml（批次 tag 会让 Release 无限累积）"; exit 1; }
+          grep -q 'dry_run' .github/workflows/prune-releases.yml \
+            || { echo "❌ prune-releases.yml 缺少 dry_run 开关"; exit 1; }
+          grep -q 'BUILD_TAG_RE' scripts/prune-releases.py \
+            || { echo "❌ prune-releases.py 未对 tag 名做批次模式校验（可能误删手工 tag）"; exit 1; }
 
           echo "✅ 发布清单契约成立（$(echo "$ENTRIES" | wc -l) 项 / 无重复 / Artifact·Release·prerelease 三处上传路径均来自清单）"
 
