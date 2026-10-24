@@ -108,18 +108,35 @@ echo "◆ 官方 minisign 二进制交叉验证"
 MSIG_BIN=""
 if command -v minisign >/dev/null 2>&1; then
   MSIG_BIN="$(command -v minisign)"
-elif curl -fsSL --retry 2 --max-time 60 -o "$WORK/minisign.tar.gz" \
+elif curl -fsSL --retry 3 --retry-delay 2 --max-time 90 -o "$WORK/minisign.tar.gz" \
      https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz 2>/dev/null; then
   tar xzf "$WORK/minisign.tar.gz" -C "$WORK" 2>/dev/null || true
   [ -x "$WORK/minisign-linux/x86_64/minisign" ] && MSIG_BIN="$WORK/minisign-linux/x86_64/minisign"
 fi
 
-if [ -n "$MSIG_BIN" ]; then
+if [ -z "$MSIG_BIN" ]; then
+  # 拿不到官方二进制就只做了格式断言——这正是「静默降级」，不能默认放过
+  if [ "${MINISIGN_ALLOW_NO_BINARY:-0}" = "1" ]; then
+    echo "   ⚠️  拿不到官方二进制，按 MINISIGN_ALLOW_NO_BINARY=1 仅做格式断言"
+  else
+    echo "   ❌ 拿不到官方 minisign 二进制，无法做黄金标准验签"
+    echo "      离线环境请显式设置 MINISIGN_ALLOW_NO_BINARY=1 再跑"
+    exit 1
+  fi
+else
   "$MSIG_BIN" -V -m "$WORK/sha256sums" -x "$WORK/sha256sums.minisig" \
     -p "$WORK/.github/minisign.pub" | sed 's/^/   /'
   echo "   ✅ 官方 minisign 验签通过"
-else
-  echo "   ⚠️  拿不到官方二进制（离线/被限流），仅完成格式断言"
+
+  # 反向：官方二进制也必须判篡改失败
+  cp "$WORK/sha256sums" "$WORK/tampered"
+  echo 'evil  x' >> "$WORK/tampered"
+  if "$MSIG_BIN" -V -m "$WORK/tampered" -x "$WORK/sha256sums.minisig" \
+       -p "$WORK/.github/minisign.pub" >/dev/null 2>&1; then
+    echo "   ❌ 官方二进制对篡改内容竟然验签通过"
+    exit 1
+  fi
+  echo "   ✅ 官方二进制正确拒绝篡改内容"
 fi
 
 echo ""
