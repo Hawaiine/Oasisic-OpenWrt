@@ -67,6 +67,17 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq python3-yaml
           python3 -c "import glob,yaml; [print('✅', p) or yaml.safe_load(open(p, encoding='utf-8')) for p in sorted(glob.glob('.github/workflows/*.yml'))]"
+      - name: 🔏 签名自检（产出的 .minisig 必须能被官方 minisign 验证）
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          # 用临时密钥签一份假 sha256sums，再拿官方 minisign 二进制验签。
+          # 2026-10-24 的废签名（缺 2 字节前缀 + 全局签名顺序错）CI 全程绿灯，
+          # 用户下载后才发现验不过；这道检查把这类错挡在合并前。
+          # 命令与 build job 的签名步骤保持一致，顺带验证那条命令能装成功
+          python3 -m pip install --quiet --break-system-packages pynacl
+          bash scripts/test-minisign-sign.sh
       - name: 🔗 feeds 分隔符契约（40 位 sha 用 ^，tag 用 ;）
         run: |
           set -e
@@ -107,13 +118,24 @@ jobs:
 
       - name: 🔍 检测上游版本
         id: check
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           SAVED=$(cat ${{ env.LAST_VERSION_FILE }} 2>/dev/null || echo "none")
           EVENT_NAME="${{ github.event_name }}"
 
           # ── OpenWrt latest tag ──
-          OWRT_TAG=$(curl -sL "https://api.github.com/repos/${{ env.OWRT_REPO }}/releases/latest" \
+          # 用 GITHUB_TOKEN 调 API：匿名请求共享 IP 配额，容易被限流后静默拿到空值
+          OWRT_TAG=$(curl -sL --retry 2 --retry-delay 2 --max-time 30 \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ env.OWRT_REPO }}/releases/latest" \
             | jq -r '.tag_name // empty')
+          if [ -z "$OWRT_TAG" ]; then
+            echo "❌ 取不到 OpenWrt latest tag（API 限流/不可达/仓库异常）" >&2
+            echo "   宁可失败也不要静默跳过：否则本次构建什么都不会编，也没人收到通知" >&2
+            exit 1
+          fi
           echo "owrt_version=$OWRT_TAG" >> "$GITHUB_OUTPUT"
 
           OWRT_SAFE="${OWRT_TAG#v}"
@@ -142,13 +164,19 @@ jobs:
           if [ -n "$INPUT_NIKKI_REF" ]; then
             NIKKI_REF="$INPUT_NIKKI_REF"
           else
-            NIKKI_REF=$(curl -sL "https://api.github.com/repos/${{ env.NIKKI_REPO }}/releases/latest" \
+            NIKKI_REF=$(curl -sL --retry 2 --retry-delay 2 --max-time 30 \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ env.NIKKI_REPO }}/releases/latest" \
               | jq -r '.tag_name // empty')
           fi
           echo "nikki_ref=$NIKKI_REF" >> "$GITHUB_OUTPUT"
 
           # 保留 tag 名用于显示
-          NIKKI_TAG=$(curl -sL "https://api.github.com/repos/${{ env.NIKKI_REPO }}/releases/latest" \
+          NIKKI_TAG=$(curl -sL --retry 2 --retry-delay 2 --max-time 30 \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ env.NIKKI_REPO }}/releases/latest" \
             | jq -r '.tag_name // empty')
           echo "nikki_tag=$NIKKI_TAG" >> "$GITHUB_OUTPUT"
 
@@ -179,9 +207,6 @@ jobs:
           if [ "$FORCE_BUILD" = "true" ] || [ "$EVENT_NAME" = "pull_request" ]; then
             echo "should_build=true" >> "$GITHUB_OUTPUT"
             echo "✅ 强制构建（force_build=true）"
-          elif [ -z "$OWRT_TAG" ]; then
-            echo "should_build=false" >> "$GITHUB_OUTPUT"
-            echo "⏭️  OpenWrt 版本为空，跳过构建"
           elif [ "$COMPOSITE" != "$SAVED" ]; then
             echo "should_build=true" >> "$GITHUB_OUTPUT"
             echo "✅ 检测到更新: $COMPOSITE (上次: $SAVED)"
@@ -457,9 +482,9 @@ jobs:
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
           MINISIGN_KEY_ID: ${{ secrets.MINISIGN_KEY_ID }}
-          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
         run: |
-          pip install pynacl -q
+          # 新镜像不再自带 pip 命令，且 PEP 668 会拦系统级安装；用 -m + --break-system-packages
+          python3 -m pip install --quiet --break-system-packages pynacl
           bash scripts/minisign-sign.sh "${{ env.BUILD_DIR }}/bin/targets/x86/64/sha256sums"
 
       - name: 📋 展示编译产物
@@ -790,7 +815,8 @@ jobs:
 
   # ─── Job 4.7: 失败通知（任何 job 红都发一张红卡） ──────────────────────
   notify-failure:
-    needs: [lint, check-upstream, build, qemu-smoke-test, release, ci-prerelease, persist-last-build]
+    # 注意：qemu-env 也要列进来，否则它单独失败时（其余 job 都 skipped）不会发失败卡片
+    needs: [lint, qemu-env, check-upstream, build, qemu-smoke-test, release, ci-prerelease, persist-last-build]
     if: failure()
     runs-on: ${{ inputs.runner_image || vars.RUNNER_IMAGE || 'ubuntu-26.04' }}
     permissions:

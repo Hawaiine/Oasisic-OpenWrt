@@ -76,7 +76,7 @@
 | 🔬 PR 验证 | 改 workflow / scripts / files 的 PR 自动跑 lint；打 `ci:full-build` 标签跑全量编译，产物走 `ci-*` prerelease |
 | 🔔 通知 | 成功/失败都发 Discord 卡片（Components V2）；失败卡片直接列出失败任务与失败步骤 |
 | 💓 保活 | `keepalive.yml` 每周提交一次心跳，防 60 天无活动被 GitHub 停用 schedule |
-| 🔏 minisign | 对 `sha256sums` 签名，Release 附带 `sha256sums.minisig`（公钥见 `.github/minisign.pub`） |
+| 🔏 minisign | 对 `sha256sums` 签名，Release 附带 `sha256sums.minisig`；CI 自检会用官方 minisign 验签（公钥见 `.github/minisign.pub`） |
 | 🖥️ PVE | qemu-ga + virtio 驱动；默认 LAN DHCP，无硬编码局域网 IP |
 | 🧭 首次向导 | 纯 HTML/CSS/JS + CGI；完成后自禁用 |
 | 🈴 中文 LuCI | `99-custom` 注册 `luci.languages.zh_cn`（规避 openwrt#16987） |
@@ -152,14 +152,15 @@ lint ─ qemu-env ─ check-upstream ─ build ─ qemu-smoke-test ─┬─ rel
 
 | 任务 | 作用 | 何时运行 |
 |------|------|----------|
-| `lint` | `bash -n` / `py_compile` / workflow YAML / feeds 分隔符契约 | 所有 PR 与手动触发 |
+| `lint` | `bash -n` / `py_compile` / workflow YAML / minisign 签名自检 / feeds 分隔符契约 | 所有 PR 与手动触发 |
+| `qemu-env` | 在 runner 上真装一遍 QEMU/OVMF 并打印版本（镜像/包名漂移早暴露） | 总是（约 1.5 分钟） |
 | `qemu-env` | 在 runner 上真装一遍 QEMU/OVMF 并打印版本（镜像/包名漂移早暴露） | 总是（约 1.5 分钟） |
 | `check-upstream` | 解析 OpenWrt latest tag、Nikki ref → 完整 SHA；与 `last_build_version` 比对 | 总是 |
 | `build` | 三层缓存 → feeds → `.config` → 编译 → 签名 → 上传 Artifact | 有新版本 / `force_build` / PR 打 `ci:full-build` |
 | `qemu-smoke-test` | QEMU 起固件，LuCI 返回 200 + JS 非 gzip | 同 `build` |
 | `release` | GitHub Release + Discord 成功卡片 | 仅 `main` |
 | `ci-prerelease` | 发 `ci-*` prerelease 直链，便于刷机测试 | 仅 PR |
-| `notify-failure` | 任一任务失败时发红色失败卡片（失败任务 + 失败步骤 + 日志链接） | 任一任务失败 |
+| `notify-failure` | 任一任务失败时发红色失败卡片（失败任务 + 失败步骤 + 日志链接） | 任一任务失败（含 `qemu-env`） |
 | `persist-last-build` | 回写 `last_build_version`（commit 带 `[skip ci]`） | 仅 `main` |
 
 **通知**：成功/失败卡片都发到 Discord「🖥️・固件发布」频道。失败卡片会列出失败任务与失败步骤，并附「查看运行日志」按钮；缺 `DISCORD_BOT_TOKEN` 时通知步骤跳过，不影响构建本身。
@@ -172,6 +173,8 @@ lint ─ qemu-env ─ check-upstream ─ build ─ qemu-smoke-test ─┬─ rel
 - ⚠️ **新镜像出厂会清空 apt 索引**：任何 `apt-get install` 前必须先 `sudo apt-get update -qq`，
   否则会「找不到包」而静默失败（2026-10-24 就在这里挂了 21 秒）。安装/定位逻辑统一收在
   `scripts/qemu-env.sh`，错误全部可见；`qemu-env` 任务每次流水线都跑，镜像或包名一变几分钟内就红
+- ⚠️ **取不到上游版本 = 硬失败**：查 GitHub API 一律带 `GITHUB_TOKEN`（匿名调用共享 IP 配额，
+  容易被限流后静默拿到空值）。取不到就 `exit 1` 发失败卡片，绝不「静默跳过当无事发生」
 
 ### 缓存 Key（摘要）
 
@@ -254,7 +257,7 @@ Oasisic-OpenWrt/
 | **手动 · `nikki_ref` 留空** | 同上，**仍是 latest Tag** | 同上，**与定时相同** | 适合「策略不变，只想再跑一遍」 |
 | **手动 · 填写 `nikki_ref`** | 同上，**仍是 latest Tag** | **你填的 Tag / 分支 / Commit** | 例如 `v1.26.2`、`main`、`31339d5` |
 | **`force_build=true`** | 不改变选版 | 不改变选版 | 只强制编译，忽略「版本没变就跳过」 |
-| **PR 触发**（改 workflow / scripts / files） | 同上，**仍是 latest Tag** | 同上 | 默认只跑 `lint`；打 `ci:full-build` 标签才全量编译，产物走 prerelease |
+| **PR 触发**（改 workflow / scripts / files） | 同上，**仍是 latest Tag** | 同上 | 默认只跑 `lint` + `qemu-env`；打 `ci:full-build` 标签才全量编译，产物走 prerelease |
 
 补充（容易误解的点）：
 
@@ -329,12 +332,25 @@ Oasisic-OpenWrt/
 | Secret | 用途 |
 |--------|------|
 | `DISCORD_BOT_TOKEN` | 发布通知（可选，缺则通知步骤失败但不影响你本地使用固件逻辑） |
-| `MINISIGN_SECRET_KEY` | 签名私钥（hex） |
-| `MINISIGN_KEY_ID` | 密钥 ID（hex） |
-| `MINISIGN_PASSWORD` | 私钥密码 |
+| `MINISIGN_SECRET_KEY` | 签名私钥 seed（32 字节 hex，64 个字符） |
+| `MINISIGN_KEY_ID` | 密钥 ID（8 字节 hex，16 个字符） |
 | `GITHUB_TOKEN` | GitHub 自动提供，无需手工配置；`persist-last-build` 用它提交去重键 |
 
 签名文件 `sha256sums.minisig` 随 Release 一并发布；公钥见 [`.github/minisign.pub`](.github/minisign.pub)。
+
+签名用 `python3 + pynacl` 直接复刻 minisign 语义（不是调官方二进制，因为 Secrets 里存的是
+裸 seed 而非 minisign 加密密钥文件）。签名前会校验「seed 派生出的公钥」与
+`.github/minisign.pub` 一致，不一致直接失败——否则签出来的固件没人能验证。
+
+验证已发布固件：
+
+```bash
+minisign -V -m sha256sums -x sha256sums.minisig -p minisign.pub
+```
+
+`lint` 任务里有 `scripts/test-minisign-sign.sh` 自检：用临时密钥签一份假 `sha256sums`，
+再拿**官方 minisign 二进制**验签，并检查篡改后必须验签失败。这类「格式看起来对但验不过」
+的错误以前会一路绿灯到用户手上。
 
 ---
 
