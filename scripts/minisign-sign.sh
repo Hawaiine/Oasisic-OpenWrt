@@ -24,11 +24,21 @@
 #
 # 下面实现已用真实 minisign 0.12 二进制双向验证：
 #   签名 → `minisign -V` 通过；篡改一个字节 → 验签失败。
+#
+# ── sha256sums 按发布清单裁剪 ─────────────────────────────────────────
+# 签名前先裁剪 sha256sums，只保留 release-assets.txt 里的文件（外加清掉
+# 自引用行）：发布什么就签什么。未发布产物的行会让用户跑 `sha256sum -c`
+# 时看到永远无法消除的 "FAILED open or read" 误报。
 set -euo pipefail
 
 SHA256SUMS="${1:-sha256sums}"
 OUT_DIR="$(dirname "$SHA256SUMS")"
 OUTPUT="${OUT_DIR}/sha256sums.minisig"
+
+# 发布产物清单（单一真源，仓库根目录的 release-assets.txt）。
+# 签名前用它裁剪 sha256sums，只保留真正会随 Release / Artifact 发布的文件。
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PUBLISHED_FILE="${MINISIGN_PUBLISHED_ASSETS:-${SCRIPT_DIR}/../release-assets.txt}"
 
 if [ ! -f "$SHA256SUMS" ]; then
     echo "❌ 文件不存在: $SHA256SUMS"
@@ -50,6 +60,7 @@ PUB_FILE="${MINISIGN_PUB_FILE:-.github/minisign.pub}"
 export MINISIGN_SHA256SUMS="$SHA256SUMS"
 export MINISIGN_OUTPUT="$OUTPUT"
 export MINISIGN_PUB_FILE="$PUB_FILE"
+export MINISIGN_PUBLISHED_ASSETS="$PUBLISHED_FILE"
 
 python3 - <<'PY'
 import base64
@@ -104,20 +115,86 @@ if os.path.isfile(pub_path):
 else:
     print(f"⚠️  未找到公钥文件 {pub_path}，跳过自校验")
 
-# ── 先清掉 sha256sums 里对本签名的自引用行，再算摘要 ──────────────────
-# OpenWrt 生成 sha256sums 时会把目录里已有的 sha256sums.minisig 也收录进去。
-# 用了源码树缓存时，那个 minisig 是上一轮构建的残留，我们随后覆盖它，
-# 于是这一行的哈希必然对不上 → 用户跑 `sha256sum -c` 会看到
-# "sha256sums.minisig: FAILED"，误以为文件被篡改。
-# 而且这是自引用：签名不能包含自己的哈希，永远不可能自洽。
-# 官方 OpenWrt 发布物里也没有这一行（实测官方 sha256sums 0 条 minisig）。
-# 注意：必须在计算 digest 之前删，否则签的是含自引用行的旧内容。
+# ── 裁剪 sha256sums：先清自引用，再只留发布清单内的文件 ────────────────
+# 必须在「计算 digest 之前」做，否则签的是旧内容。
+#
+# (1) 自引用行（*sha256sums.minisig）
+#     OpenWrt 生成 sha256sums 时会把目录里已有的 sha256sums.minisig 也收录进去。
+#     用了源码树缓存时，那个 minisig 是上一轮构建的残留，我们随后覆盖它，
+#     于是这一行的哈希必然对不上 → 用户跑 `sha256sum -c` 会看到
+#     "sha256sums.minisig: FAILED"，误以为文件被篡改。
+#     而且这是自引用：签名不能包含自己的哈希，永远不可能自洽。
+#     官方 OpenWrt 发布物里也没有这一行（实测官方 sha256sums 0 条 minisig）。
+#
+# (2) 未发布产物的行（ext4 变体 / kernel.bin / rootfs.tar.gz / buildinfo …）
+#     OpenWrt 对整个 bin/targets/x86/64/ 目录生成校验和，但 Release 只发
+#     release-assets.txt 里那些文件。剩下的行用户永远比对不了（下载不到），
+#     跑 `sha256sum -c` 一样是 "FAILED open or read" 误报。
+#     所以签名前按发布清单裁剪：发什么，签什么，其余一律不进 sha256sums。
 sums_lines = open(sums_path, encoding="utf-8").read().splitlines(keepends=True)
-kept = [l for l in sums_lines if not l.rstrip().endswith("*sha256sums.minisig")]
+
+
+def entry_name(line):
+    """从 'hash *name' / 'hash  name' 提取文件名（去掉 binary 模式的 *）。"""
+    parts = line.split(None, 1)
+    return parts[1].strip().lstrip("*").strip() if len(parts) > 1 else ""
+
+
+published_path = os.environ.get("MINISIGN_PUBLISHED_ASSETS", "")
+allow_missing_list = os.environ.get("MINISIGN_ALLOW_NO_PUBLISHED_LIST", "0") == "1"
+
+published = None
+if os.path.isfile(published_path):
+    published = {
+        os.path.basename(l.strip())
+        for l in open(published_path, encoding="utf-8")
+        if l.strip() and not l.strip().startswith("#")
+    }
+    if not published:
+        sys.exit(f"❌ 发布清单 {published_path} 里没有任何有效条目")
+elif allow_missing_list:
+    # 只在离线调试时显式允许；CI 里禁止静默降级
+    print(f"⚠️  未找到发布清单 {published_path}，按 MINISIGN_ALLOW_NO_PUBLISHED_LIST=1 跳过裁剪")
+else:
+    sys.exit(
+        f"❌ 未找到发布清单 {published_path}\n"
+        "   sha256sums 必须按发布清单裁剪，否则用户校验会看到指向未发布产物的 FAILED。\n"
+        "   离线调试确需跳过时，显式设置 MINISIGN_ALLOW_NO_PUBLISHED_LIST=1。"
+    )
+
+kept = []
+dropped_self = 0
+dropped_unpublished = 0
+for line in sums_lines:
+    if not line.strip():
+        kept.append(line)
+        continue
+    name = entry_name(line)
+    if name == "sha256sums.minisig":
+        dropped_self += 1
+        continue
+    if published is not None and os.path.basename(name) not in published:
+        dropped_unpublished += 1
+        continue
+    kept.append(line)
+
 if len(kept) != len(sums_lines):
     with open(sums_path, "w", encoding="utf-8") as fh:
         fh.writelines(kept)
-    print(f"🧹 已从 sha256sums 移除 {len(sums_lines) - len(kept)} 行自引用（*sha256sums.minisig）")
+    if dropped_self:
+        print(f"🧹 已从 sha256sums 移除 {dropped_self} 行自引用（*sha256sums.minisig）")
+    if dropped_unpublished:
+        print(f"🧹 已移除 {dropped_unpublished} 行未发布产物（不在 release-assets.txt 内）")
+    print(f"📄 sha256sums 现为 {len(kept)} 行，全部可随 Release 下载比对")
+else:
+    print(f"📄 sha256sums 已是 {len(kept)} 行，无需裁剪")
+
+# 清单里有、但 OpenWrt 没生成校验和的条目（例如 feeds.conf.default）只是提示
+if published is not None:
+    in_sums = {os.path.basename(entry_name(l)) for l in kept if l.strip()}
+    not_checksummed = sorted(n for n in published if n not in in_sums and not n.endswith("sha256sums.minisig"))
+    if not_checksummed:
+        print(f"ℹ️  以下发布项不在 sha256sums 内（OpenWrt 未对其生成校验和）：{', '.join(not_checksummed)}")
 
 # ── 签名 ──────────────────────────────────────────────────────────────
 # minisign 默认走 prehashed 模式：先 blake2b-512(文件内容)，再对摘要做 Ed25519

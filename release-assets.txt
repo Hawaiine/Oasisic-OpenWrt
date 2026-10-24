@@ -1,0 +1,29 @@
+# =============================================================================
+# 发布产物清单（单一真源 · single source of truth）
+#
+# 用途（四处共用，避免各自抄一份列表后漂移）：
+#   1. build   job：Artifact 上传路径
+#   2. release job：GitHub Release 上传列表
+#   3. scripts/minisign-sign.sh：裁剪 sha256sums，只留真正会被发布的文件
+#   4. lint    job：清单契约检查（见 workflow 的「发布清单契约」步骤）
+#
+# 路径相对仓库根（即 release-artifacts/ 与 build 目录均以此为子路径）。
+# 以 # 开头的行为注释；空行忽略。
+#
+# 为什么 sha256sums 要按这份清单裁剪：
+#   OpenWrt 会对整个 bin/targets/x86/64/ 目录生成校验和，里面包含 ext4 变体、
+#   kernel.bin、rootfs.tar.gz、targz-rootfs.tar.gz、feeds.buildinfo 等**不发布**
+#   的产物。那些行用户永远无法比对（文件根本下载不到），跑 `sha256sum -c` 会看到
+#   "FAILED open or read"，与自引用行同类：属于永远不可能自洽的误报。
+# =============================================================================
+
+bin/targets/x86/64/sha256sums
+bin/targets/x86/64/sha256sums.minisig
+bin/targets/x86/64/openwrt-x86-64-generic-squashfs-combined-efi.img.gz
+bin/targets/x86/64/openwrt-x86-64-generic-squashfs-combined.img.gz
+bin/targets/x86/64/openwrt-x86-64-generic-image-efi.iso
+bin/targets/x86/64/openwrt-x86-64-generic-image.iso
+bin/targets/x86/64/config.buildinfo
+bin/targets/x86/64/profiles.json
+bin/targets/x86/64/openwrt-x86-64-generic.manifest
+feeds.conf.default

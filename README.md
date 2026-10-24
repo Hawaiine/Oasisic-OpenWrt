@@ -152,7 +152,7 @@ lint ─ qemu-env ─ check-upstream ─ build ─ qemu-smoke-test ─┬─ rel
 
 | 任务 | 作用 | 何时运行 |
 |------|------|----------|
-| `lint` | `bash -n` / `py_compile` / workflow YAML / minisign 签名自检 / feeds 分隔符契约 | 所有 PR 与手动触发 |
+| `lint` | `bash -n` / `py_compile` / workflow YAML / minisign 签名自检 / feeds 分隔符契约 / 发布清单契约 | 所有 PR 与手动触发 |
 | `qemu-env` | 在 runner 上真装一遍 QEMU/OVMF 并打印版本（镜像/包名漂移早暴露） | 总是（约 1.5 分钟） |
 | `qemu-env` | 在 runner 上真装一遍 QEMU/OVMF 并打印版本（镜像/包名漂移早暴露） | 总是（约 1.5 分钟） |
 | `check-upstream` | 解析 OpenWrt latest tag、Nikki ref → 完整 SHA；与 `last_build_version` 比对 | 总是 |
@@ -236,6 +236,7 @@ Oasisic-OpenWrt/
 │   ├── notify-discord.py            # 成功卡片（Components V2）
 │   └── notify-discord-failure.py    # 失败卡片（失败任务 + 失败步骤）
 ├── feeds.conf                       # 仅本地参考；CI 一律用 gen-feeds-conf.sh 生成，勿照此改
+├── release-assets.txt               # 发布产物清单（唯一真源：Artifact / Release / sha256sums 裁剪共用）
 ├── last_build_version               # 去重键（构建后由 persist-last-build 提交更新）
 ├── LICENSE                          # GPLv2
 └── README.md
@@ -338,6 +339,12 @@ Oasisic-OpenWrt/
 
 签名文件 `sha256sums.minisig` 随 Release 一并发布；公钥见 [`.github/minisign.pub`](.github/minisign.pub)。
 
+`sha256sums` 在签名前会**按发布清单裁剪**（清单真源：仓库根目录 `release-assets.txt`）：
+只保留真正随 Release / Artifact 发布的文件，并顺带清掉对 `sha256sums.minisig` 的自引用行。
+OpenWrt 默认会对整个 `bin/targets/x86/64/` 生成校验和（含 ext4 变体、`kernel.bin`、
+`rootfs.tar.gz` 等不发布的产物），那些行用户永远下载不到，`sha256sum -c` 只会报
+`FAILED open or read`——发布什么就签什么，避免这类无从比对的误报。
+
 签名用 `python3 + pynacl` 直接复刻 minisign 语义（不是调官方二进制，因为 Secrets 里存的是
 裸 seed 而非 minisign 加密密钥文件）。签名前会校验「seed 派生出的公钥」与
 `.github/minisign.pub` 一致，不一致直接失败——否则签出来的固件没人能验证。
@@ -345,12 +352,17 @@ Oasisic-OpenWrt/
 验证已发布固件：
 
 ```bash
+sha256sum -c --ignore-missing sha256sums
 minisign -V -m sha256sums -x sha256sums.minisig -p minisign.pub
 ```
 
+发布后流水线还会把 tag（`{OpenWrt 版本}-n{Nikki 短 SHA}`）强制对齐到**本次构建的提交**：
+同一个 tag 重建时 GitHub Release 的资产是原地替换、tag 自身不会动，不对齐就会出现
+「tag 指向旧提交、资产却来自新提交」，按 tag 复现源码的人拿到的是修复前的 workflow。
+
 `lint` 任务里有 `scripts/test-minisign-sign.sh` 自检：用临时密钥签一份假 `sha256sums`，
-再拿**官方 minisign 二进制**验签，并检查篡改后必须验签失败。这类「格式看起来对但验不过」
-的错误以前会一路绿灯到用户手上。
+再拿**官方 minisign 二进制**验签，并检查篡改后必须验签失败、自引用行与未发布产物行必须被裁掉、
+拿不到发布清单时必须硬失败（不许静默降级）。这类「格式看起来对但验不过」的错误以前会一路绿灯到用户手上。
 
 ---
 

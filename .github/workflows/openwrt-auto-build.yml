@@ -87,6 +87,35 @@ jobs:
           grep -q 'OpenWrt-nikki.git;v1.26.2' /tmp/f2 || { echo "❌ tag 未用 ;"; exit 1; }
           echo "✅ feeds 分隔符契约成立"
 
+      - name: 📦 发布清单契约（release-assets.txt 是唯一真源）
+        run: |
+          set -e
+          WF=".github/workflows/openwrt-auto-build.yml"
+          # 用字符串拼接构造模式，避免这条检查把自己写下的模式串当成命中（自匹配）
+          HARDCODED_PREFIX="release-artifacts/bin""/targets"
+          [ -s release-assets.txt ] || { echo "❌ release-assets.txt 缺失或为空"; exit 1; }
+
+          ENTRIES=$(grep -vE '^[[:space:]]*(#|$)' release-assets.txt)
+          [ -n "$ENTRIES" ] || { echo "❌ release-assets.txt 没有有效条目"; exit 1; }
+
+          # 文件名不能重复，否则 Release 会因为同名资产互相覆盖
+          DUP=$(echo "$ENTRIES" | xargs -n1 basename | sort | uniq -d)
+          [ -z "$DUP" ] || { echo "❌ release-assets.txt 有重复文件名：$DUP"; exit 1; }
+
+          # Artifact 与 Release 两条路径都必须从清单生成，不能各自硬编码一份列表
+          COUNT=$(grep -c 'release-assets.txt' "$WF")
+          [ "$COUNT" -ge 2 ] || { echo "❌ 只找到 $COUNT 处引用 release-assets.txt（Artifact/Release 各需 1 处）"; exit 1; }
+          if grep -qF "$HARDCODED_PREFIX" "$WF"; then
+            echo "❌ workflow 里仍有硬编码的资产路径（$HARDCODED_PREFIX*），应从 release-assets.txt 生成"
+            exit 1
+          fi
+
+          # 签名脚本必须按同一份清单裁剪 sha256sums，否则用户校验又会看到未发布产物的 FAILED
+          grep -q 'MINISIGN_PUBLISHED_ASSETS' scripts/minisign-sign.sh \
+            || { echo "❌ minisign-sign.sh 未接入发布清单裁剪"; exit 1; }
+
+          echo "✅ 发布清单契约成立（$(echo "$ENTRIES" | wc -l) 项 / 无重复 / 两条上传路径均来自清单）"
+
   # ─── Job 0.5: QEMU 环境自检（每次都跑，提前发现 runner 镜像 / apt 变化）──
   # 成本约 1.5 分钟，换来「镜像或包名一变 2 分钟内就红」，而不是等一小时编译完才发现
   qemu-env:
@@ -231,6 +260,7 @@ jobs:
     outputs:
       kernel_version: ${{ steps.kernel-version.outputs.kernel_version }}
       nikki_version_actual: ${{ steps.nikki-version.outputs.nikki_version_actual }}
+      mihomo_version: ${{ steps.mihomo-version.outputs.mihomo_version }}
       root_password: ${{ steps.gen-pass.outputs.root_password }}
       owrt_version: ${{ needs.check-upstream.outputs.owrt_version }}
       owrt_ver_safe: ${{ needs.check-upstream.outputs.owrt_ver_safe }}
@@ -470,6 +500,20 @@ jobs:
           echo "nikki_version_actual=${VER:-$FALLBACK}" >> "$GITHUB_OUTPUT"
           echo "✅ Nikki 版本: ${VER:-$FALLBACK}"
 
+      - name: 📦 提取 mihomo 版本
+        id: mihomo-version
+        run: |
+          MV=""
+          MFT="${{ env.BUILD_DIR }}/bin/targets/x86/64/openwrt-x86-64-generic.manifest"
+          if [ -f "$MFT" ]; then
+            # manifest 行形如 "mihomo-meta - 1.19.32"，取版本号并去掉 -rN 后缀
+            MV=$(grep -E '^mihomo-(meta|core) - ' "$MFT" | head -1 | awk '{print $3}' | sed 's/-r[0-9]*$//')
+          fi
+          echo "mihomo_version=${MV}" >> "$GITHUB_OUTPUT"
+          echo "✅ mihomo 版本: ${MV:-未知}"
+          # Nikki 版本与 mihomo 版本是两件事，Release 正文里不能混用同一个数字
+          echo "ℹ️  Nikki（luci-app-nikki）: ${{ steps.nikki-version.outputs.nikki_version_actual }}"
+
       - name: 🧹 清理中间产物
         run: |
           du -sh "${{ env.BUILD_DIR }}"
@@ -513,21 +557,27 @@ jobs:
           echo "- Artifact 名：\`${{ needs.check-upstream.outputs.artifact_name }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- 命令行：\`gh run download ${{ github.run_id }} -n ${{ needs.check-upstream.outputs.artifact_name }}\`" >> "$GITHUB_STEP_SUMMARY"
 
+      - name: 📋 组装发布清单（Artifact 上传路径）
+        id: release-assets
+        run: |
+          set -euo pipefail
+          if [ ! -s release-assets.txt ]; then
+            echo "❌ release-assets.txt 缺失或为空——发布清单是单一真源，不能少" >&2
+            exit 1
+          fi
+          {
+            echo "paths<<RELEASE_ASSET_EOF"
+            grep -vE '^[[:space:]]*(#|$)' release-assets.txt | sed "s|^|${{ env.BUILD_DIR }}/|"
+            echo "RELEASE_ASSET_EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "📦 本次发布清单（release-assets.txt）："
+          grep -vE '^[[:space:]]*(#|$)' release-assets.txt | sed 's|^|   |'
+
       - name: 📤 上传固件 Artifact
         uses: actions/upload-artifact@v7
         with:
           name: ${{ needs.check-upstream.outputs.artifact_name }}
-          path: |
-            ${{ env.BUILD_DIR }}/bin/targets/x86/64/openwrt-x86-64-generic-squashfs-combined-efi.img.gz
-            ${{ env.BUILD_DIR }}/bin/targets/x86/64/openwrt-x86-64-generic-squashfs-combined.img.gz
-            ${{ env.BUILD_DIR }}/bin/targets/x86/64/openwrt-x86-64-generic-image.iso
-            ${{ env.BUILD_DIR }}/bin/targets/x86/64/openwrt-x86-64-generic-image-efi.iso
-            ${{ env.BUILD_DIR }}/bin/targets/x86/64/sha256sums
-            ${{ env.BUILD_DIR }}/bin/targets/x86/64/sha256sums.minisig
-            ${{ env.BUILD_DIR }}/feeds.conf.default
-            ${{ env.BUILD_DIR }}/bin/targets/x86/64/config.buildinfo
-            ${{ env.BUILD_DIR }}/bin/targets/x86/64/profiles.json
-            ${{ env.BUILD_DIR }}/bin/targets/x86/64/openwrt-x86-64-generic.manifest
+          path: ${{ steps.release-assets.outputs.paths }}
           retention-days: 30
 
   # ─── Job 3: QEMU 烟雾测试（阻断门）─────────────────────────────────────
@@ -666,10 +716,19 @@ jobs:
         run: |
           NV="${{ needs.build.outputs.nikki_version_actual }}"
           KV="${{ needs.build.outputs.kernel_version }}"
+          MV="${{ needs.build.outputs.mihomo_version }}"
           PW="${{ needs.build.outputs.root_password }}"
           NIKKI_REF="${{ needs.build.outputs.nikki_ref }}"
           NIKKI_SHA="${{ needs.build.outputs.nikki_sha }}"
           NIKKI_SHORT="${NIKKI_SHA:0:7}"
+          # Nikki（luci-app-nikki）与 mihomo 核心是两个包、两个版本号，
+          # 不能拿 Nikki 的版本号当 mihomo 的（曾写成 "mihomo-meta 1.26.2"，
+          # 实际 manifest 里是 mihomo-meta 1.19.32）。
+          if [ -n "$MV" ] && [ "$MV" != "?" ]; then
+            PROXY_LINE="- **代理**: Nikki ${NV} + mihomo-meta ${MV}"
+          else
+            PROXY_LINE="- **代理**: Nikki ${NV}（mihomo-meta 版本见 manifest）"
+          fi
           cat > release-body.md << RELEASEEOF
           ## 🏝️ Oasisic OpenWrt 自动构建
 
@@ -694,22 +753,26 @@ jobs:
           - **首次开机**: DHCP 自动获取 IP（到主路由查看）
 
           ### 📦 预装组件
-          - **代理**: Nikki + mihomo-meta ${NV}
+          ${PROXY_LINE}
           - **主题**: luci-theme-bootstrap
           - **PVE**: qemu-ga + virtio 全系驱动
           - **DNS**: dnsmasq-full (dhcp/dnssec/nftset/dhcpv6)
           - **工具**: bash, curl, wget, yq, htop, tcpdump, vim
 
-          ### 📥 下载
-          - \`squashfs-combined-efi.img.gz\` — EFI 启动 (推荐 PVE UEFI)
-          - \`squashfs-combined.img.gz\` — BIOS 启动
-          - \`image.iso\` — ISO 镜像
-          - \`feeds.conf.default\` — 编译源列表
-          - \`sha256sums\` — 固件校验和
-          - \`sha256sums.minisig\` — minisign 签名
-          - \`config.buildinfo\` — 编译配置
-          - \`profiles.json\` — 目标架构
-          - \`manifest\` — 包列表
+          ### 📥 下载（文件名以资产列表为准）
+          - \`openwrt-x86-64-generic-squashfs-combined-efi.img.gz\` — EFI 启动（PVE / UEFI 推荐）
+          - \`openwrt-x86-64-generic-squashfs-combined.img.gz\` — 传统 BIOS 启动
+          - \`openwrt-x86-64-generic-image-efi.iso\` / \`openwrt-x86-64-generic-image.iso\` — ISO 镜像
+          - \`sha256sums\` / \`sha256sums.minisig\` — 校验和与 minisign 签名
+          - \`config.buildinfo\` / \`profiles.json\` / \`openwrt-x86-64-generic.manifest\` / \`feeds.conf.default\` — 编译元数据
+
+          ### ✅ 校验下载（可选）
+          \`\`\`
+          sha256sum -c --ignore-missing sha256sums
+          minisign -V -m sha256sums -x sha256sums.minisig -p minisign.pub
+          \`\`\`
+          - \`sha256sums\` 只收录本次发布的文件（未发布产物不进清单），不会出现无从比对的 FAILED
+          - \`minisign.pub\` 见仓库 \`.github/minisign.pub\`
 
           ### 🔑 首次使用
           1. PVE 导入磁盘（见 README）
@@ -717,27 +780,75 @@ jobs:
           3. 配置静态 IP + 管理员密码
           RELEASEEOF
 
+      - name: 📋 组装发布清单（Release 上传路径）
+        id: release-assets
+        run: |
+          set -euo pipefail
+          if [ ! -s release-assets.txt ]; then
+            echo "❌ release-assets.txt 缺失或为空——发布清单是单一真源，不能少" >&2
+            exit 1
+          fi
+          {
+            echo "files<<RELEASE_ASSET_EOF"
+            grep -vE '^[[:space:]]*(#|$)' release-assets.txt | sed 's|^|release-artifacts/|'
+            echo "RELEASE_ASSET_EOF"
+          } >> "$GITHUB_OUTPUT"
+          # 资产必须真实存在：清单里少一个文件却照发，等于发布残缺
+          MISSING=0
+          while IFS= read -r p; do
+            case "$p" in ''|\#*) continue ;; esac
+            if [ ! -f "release-artifacts/$p" ]; then
+              echo "❌ 清单中的 release-artifacts/$p 不存在（artifact 下载不完整或清单过期）" >&2
+              MISSING=$((MISSING + 1))
+            fi
+          done < release-assets.txt
+          if [ "$MISSING" -ne 0 ]; then
+            exit 1
+          fi
+          echo "📦 发布清单（全部存在）："
+          grep -vE '^[[:space:]]*(#|$)' release-assets.txt | sed 's|^|   |'
+
       - name: 🚀 发布 Release
         uses: softprops/action-gh-release@v3
         if: github.ref == 'refs/heads/main'
         with:
           tag_name: ${{ needs.check-upstream.outputs.owrt_ver_safe }}-n${{ needs.build.outputs.nikki_short_sha }}
           name: 🏝️ Oasisic OpenWrt ${{ needs.check-upstream.outputs.owrt_ver_safe }} (nikki-${{ needs.build.outputs.nikki_short_sha }})
-          fail_on_unmatched_files: false
+          fail_on_unmatched_files: true
           make_latest: true
           generate_release_notes: false
           body_path: release-body.md
-          files: |
-            release-artifacts/bin/targets/x86/64/sha256sums
-            release-artifacts/bin/targets/x86/64/sha256sums.minisig
-            release-artifacts/feeds.conf.default
-            release-artifacts/bin/targets/x86/64/openwrt-x86-64-generic-squashfs-combined-efi.img.gz
-            release-artifacts/bin/targets/x86/64/openwrt-x86-64-generic-squashfs-combined.img.gz
-            release-artifacts/bin/targets/x86/64/openwrt-x86-64-generic-image.iso
-            release-artifacts/bin/targets/x86/64/openwrt-x86-64-generic-image-efi.iso
-            release-artifacts/bin/targets/x86/64/config.buildinfo
-            release-artifacts/bin/targets/x86/64/profiles.json
-            release-artifacts/bin/targets/x86/64/openwrt-x86-64-generic.manifest
+          files: ${{ steps.release-assets.outputs.files }}
+
+      - name: 🏷️ 把 tag 对齐到本次构建的提交
+        # tag 名只带 OpenWrt 版本 + Nikki 短 SHA，重建时 Release 资产是「同 tag 原地替换」，
+        # tag 自身不会跟着动。结果：tag 指向旧提交，按 tag 复现源码的人拿到的是修复前的
+        # workflow（历史上真的发生过：tag 停在 34cfbec9，资产却由 eebe0040 构建）。
+        # 这里在发布后把 tag 强制指向本次构建提交，让「tag = 产出这批资产的源码」恒成立。
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ needs.check-upstream.outputs.owrt_ver_safe }}-n${{ needs.build.outputs.nikki_short_sha }}"
+          API="https://api.github.com/repos/${{ github.repository }}/git/refs/tags/$TAG"
+          gh_get() { curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -H "User-Agent: openwrt-ci" "$1"; }
+          CUR=$(gh_get "$API" | python3 -c 'import json,sys;print(json.load(sys.stdin)["object"]["sha"])')
+          if [ "$CUR" = "$GITHUB_SHA" ]; then
+            echo "✅ tag $TAG 已指向 $GITHUB_SHA，无需移动"
+          else
+            echo "🔁 tag $TAG 当前指向 $CUR → 移动到 $GITHUB_SHA"
+            curl -fsSL -X PATCH -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" -H "User-Agent: openwrt-ci" \
+              "$API" -d "{\"sha\":\"$GITHUB_SHA\",\"force\":true}" >/dev/null
+            # 回读确认，不靠「请求没报错」当成功
+            NOW=$(gh_get "$API" | python3 -c 'import json,sys;print(json.load(sys.stdin)["object"]["sha"])')
+            if [ "$NOW" != "$GITHUB_SHA" ]; then
+              echo "❌ tag 移动后回读仍是 $NOW，期望 $GITHUB_SHA" >&2
+              exit 1
+            fi
+            echo "✅ tag $TAG 已对齐到 $GITHUB_SHA（回读确认）"
+          fi
 
       - name: 📢 Discord 通知（🖥️・固件发布）
         if: success()

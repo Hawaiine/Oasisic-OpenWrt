@@ -34,11 +34,20 @@ mkdir -p "$WORK/.github"
 printf 'untrusted comment: minisign public key for self-test\n%s\n' "$PUB_B64" \
   > "$WORK/.github/minisign.pub"
 
-# 故意混入一条「对 sha256sums.minisig 自身的引用」，模拟用了源码树缓存时
-# OpenWrt 把上一轮残留 minisig 的哈希写进 sha256sums 的情形。
-# 不处理的话用户 `sha256sum -c` 会看到 "sha256sums.minisig: FAILED"，
-# 误以为文件被篡改（自引用，永远不可能自洽）。
-printf 'abc123  test.img.gz\ndef456  test.iso\ndeadbeef  *sha256sums.minisig\n' > "$WORK/sha256sums"
+# 裁剪清单用仓库里真实的那份（单一真源），保证测试与 CI 跑的是同一份列表
+cp "$REPO_ROOT/release-assets.txt" "$WORK/.github/release-assets.txt"
+
+# 假 sha256sums 里故意混入两类「永远不可能自洽」的行，模拟真实构建目录：
+#   1. 对 sha256sums.minisig 自身的引用（用源码树缓存时 OpenWrt 会把上一轮
+#      残留 minisig 的哈希写进来，我们随后覆盖该文件 → 该行必然对不上）
+#   2. 未发布产物（ext4 变体这类 Release 里根本没有的文件），用户比对不了
+# 不处理的话用户 `sha256sum -c` 会看到 "FAILED open or read"，
+# 误以为文件被篡改。裁剪后只应剩发布清单内的行。
+printf 'abc123  openwrt-x86-64-generic-squashfs-combined-efi.img.gz\n' > "$WORK/sha256sums"
+printf 'def456  openwrt-x86-64-generic-image-efi.iso\n' >> "$WORK/sha256sums"
+printf 'feed99  openwrt-x86-64-generic-ext4-combined-efi.img.gz\n' >> "$WORK/sha256sums"
+printf 'beef77  openwrt-x86-64-generic-kernel.bin\n' >> "$WORK/sha256sums"
+printf 'deadbeef  *sha256sums.minisig\n' >> "$WORK/sha256sums"
 
 echo "◆ 临时密钥已生成（keyid ${KID}）"
 
@@ -46,6 +55,7 @@ echo "◆ 临时密钥已生成（keyid ${KID}）"
 if ! MINISIGN_SECRET_KEY="$SEED" \
      MINISIGN_KEY_ID="$KID" \
      MINISIGN_PUB_FILE="$WORK/.github/minisign.pub" \
+     MINISIGN_PUBLISHED_ASSETS="$WORK/.github/release-assets.txt" \
      bash "$SIGNER" "$WORK/sha256sums" >"$WORK/sign.log" 2>&1; then
   echo "❌ 签名脚本执行失败"
   cat "$WORK/sign.log"
@@ -72,11 +82,24 @@ assert len(lines) == 4, f"签名文件应为 4 行，实际 {len(lines)}"
 assert lines[0].startswith("untrusted comment: "), "第 1 行必须是 untrusted comment"
 assert lines[2].startswith("trusted comment: "), "第 3 行必须是 trusted comment"
 
-# sha256sums 里不能再有对本签名的自引用行，否则用户 `sha256sum -c` 必然报 FAILED
+# sha256sums 里既不能有对本签名的自引用行，也不能有未发布产物的行：
+# 两种都会让用户 `sha256sum -c` 报永远无法消除的 FAILED（文件下载不到 / 签名自引用）
 sums_text = open(f"{work}/sha256sums").read()
 assert "sha256sums.minisig" not in sums_text, (
     "sha256sums 里仍有 *sha256sums.minisig 自引用行——用户校验时会误报文件被篡改"
 )
+assert "ext4-combined-efi.img.gz" not in sums_text, (
+    "sha256sums 里仍有未发布产物（ext4 变体）的行——用户下载不到，校验必报 FAILED open or read"
+)
+assert "kernel.bin" not in sums_text, (
+    "sha256sums 里仍有未发布产物（kernel.bin）的行——用户下载不到，校验必报 FAILED open or read"
+)
+for name in (
+    "openwrt-x86-64-generic-squashfs-combined-efi.img.gz",
+    "openwrt-x86-64-generic-image-efi.iso",
+):
+    assert name in sums_text, f"裁剪过度：发布清单内的 {name} 被误删了"
+print("   ✅ 裁剪正确：自引用行与未发布产物行已移除，发布内文件保留")
 
 blob = base64.b64decode(lines[1])
 assert len(blob) == 74, f"签名 blob 应为 74 字节（2 alg + 8 keyid + 64 sig），实际 {len(blob)}"
@@ -113,6 +136,32 @@ except BadSignatureError:
 else:
     sys.exit("   ❌ 篡改后验签竟然通过了——签名没覆盖内容！")
 PY
+
+# ─── 4.5 缺发布清单必须硬失败（禁止静默降级）───────────────────────────
+# 拿不到 release-assets.txt 时如果「跳过裁剪照签」，线上又会回到
+# 「17 行 / 16 行里 9 行指向不存在的文件」的老样子——这类降级必须红。
+echo "◆ 负向测试：拿不到发布清单必须硬失败，不得静默跳过裁剪"
+cp "$WORK/sha256sums" "$WORK/sums.bak"
+printf 'evil11  openwrt-x86-64-generic-ext4-combined.img.gz\n' >> "$WORK/sha256sums"
+if MINISIGN_SECRET_KEY="$SEED" \
+   MINISIGN_KEY_ID="$KID" \
+   MINISIGN_PUB_FILE="$WORK/.github/minisign.pub" \
+   MINISIGN_PUBLISHED_ASSETS="$WORK/does-not-exist.txt" \
+   bash "$SIGNER" "$WORK/sha256sums" >"$WORK/sign-nolist.log" 2>&1; then
+  echo "   ❌ 缺发布清单竟然签成功了（静默降级）"
+  exit 1
+fi
+grep -q "未找到发布清单" "$WORK/sign-nolist.log" || {
+  echo "   ❌ 失败原因不是缺发布清单："
+  cat "$WORK/sign-nolist.log"
+  exit 1
+}
+grep -q "ext4-combined.img.gz" "$WORK/sha256sums" || {
+  echo "   ❌ 硬失败时 sha256sums 已被改动（应先失败再动手）"
+  exit 1
+}
+echo "   ✅ 缺发布清单 → 硬失败，且未改动 sha256sums"
+cp "$WORK/sums.bak" "$WORK/sha256sums"
 
 # ─── 5. 有官方二进制就用它再验一遍（黄金标准）──────────────────────────
 echo "◆ 官方 minisign 二进制交叉验证"
