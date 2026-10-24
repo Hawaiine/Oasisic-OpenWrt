@@ -737,6 +737,8 @@ jobs:
           NIKKI_REF="${{ needs.build.outputs.nikki_ref }}"
           NIKKI_SHA="${{ needs.build.outputs.nikki_sha }}"
           NIKKI_SHORT="${NIKKI_SHA:0:7}"
+          TAG="${RELEASE_TAG:-${{ env.RELEASE_TAG }}}"
+          RUN_NO="${{ github.run_number }}"
           # Nikki（luci-app-nikki）与 mihomo 核心是两个包、两个版本号，
           # 不能拿 Nikki 的版本号当 mihomo 的（曾写成 "mihomo-meta 1.26.2"，
           # 实际 manifest 里是 mihomo-meta 1.19.32）。
@@ -754,11 +756,17 @@ jobs:
           | Nikki 版本 | ${NV} |
           | Nikki 提交 | ${NIKKI_SHORT}（ref: ${NIKKI_REF}） |
           RELEASEEOF
+          # Nikki（luci-app-nikki）与 mihomo 核心是两个包，正文里并列，避免互相冒充
+          if [ -n "$MV" ] && [ "$MV" != "?" ]; then
+            echo "| mihomo 核心 | ${MV} |" >> release-body.md
+          fi
           if [ -n "$KV" ] && [ "$KV" != "?" ]; then
             echo "| Linux 内核 | ${KV} |" >> release-body.md
           fi
           cat >> release-body.md << RELEASEEOF
           | 架构 | x86/64, EFI, squashfs |
+          | Release 标签 | ${TAG} |
+          | 构建 run | #${RUN_NO} |
           | 编译时间 | $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S') 北京时间 |
 
           ### 🔑 登录信息

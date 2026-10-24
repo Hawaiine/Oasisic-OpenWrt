@@ -265,7 +265,10 @@ Oasisic-OpenWrt/
 1. **OpenWrt 目前没有手动版本参数**：定时和手动都跟官方 **最新 Release Tag**；不能在 Actions UI 里改 OpenWrt 版本（除非以后加 input）。
 2. **Nikki 仅有新 Commit、尚未发新 Tag 时**：定时 **不会** 自动带上该 Commit；要吃到它，必须 **手动** 填 `nikki_ref`（并常勾 `force_build`）。
 3. **包管理器里显示的 Nikki 版本号** 仍可能是 Tag 名（如 1.26.2）；以 Release 正文的 **Nikki ref** 和产物里 `feeds.conf.default` 的 `^完整SHA` 为准。
-4. **是否真的开编**：还看仓库里是否有 `last_build_version`、是否与  
+4. **「Nikki 版本」≠「mihomo 版本」**：正文里的 Nikki 版本是 `luci-app-nikki` 包（如 1.26.2），
+   mihomo 核心是另一个包 `mihomo-meta`（如 1.19.32），两者独立升级；正文表格、Discord 卡片都分列，
+   需要核对内核/代理实际版本时以产物里的 `openwrt-x86-64-generic.manifest` 为准。
+5. **是否真的开编**：还看仓库里是否有 `last_build_version`、是否与  
    `{OpenWrtTag}_nikki-{完整SHA}` 相同；相同且未 force 则会跳过。
 
 ---
@@ -300,7 +303,7 @@ Oasisic-OpenWrt/
 
 1. [Releases](https://github.com/Hawaiine/Oasisic-OpenWrt/releases) 下载产物  
 2. 标签形如 `25.12.6-n31339d5-r240`（`{OpenWrt 版本}-n{Nikki 短 SHA}-r{构建号}`）；每次重建独立成 tag + Release，历史版本不会被覆盖  
-3. 正文含 root 随机密码、Nikki 提交（ref）、内核版本  
+3. 正文含 root 随机密码、Nikki 提交（ref）、mihomo 核心版本、内核版本、Release 标签与构建 run 号  
 4. 可选出现/更新 `last_build_version`（`persist-last-build` 依赖 token 可推 main）
 
 ---
