@@ -107,13 +107,24 @@ jobs:
 
       - name: 🔍 检测上游版本
         id: check
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           SAVED=$(cat ${{ env.LAST_VERSION_FILE }} 2>/dev/null || echo "none")
           EVENT_NAME="${{ github.event_name }}"
 
           # ── OpenWrt latest tag ──
-          OWRT_TAG=$(curl -sL "https://api.github.com/repos/${{ env.OWRT_REPO }}/releases/latest" \
+          # 用 GITHUB_TOKEN 调 API：匿名请求共享 IP 配额，容易被限流后静默拿到空值
+          OWRT_TAG=$(curl -sL --retry 2 --retry-delay 2 --max-time 30 \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ env.OWRT_REPO }}/releases/latest" \
             | jq -r '.tag_name // empty')
+          if [ -z "$OWRT_TAG" ]; then
+            echo "❌ 取不到 OpenWrt latest tag（API 限流/不可达/仓库异常）" >&2
+            echo "   宁可失败也不要静默跳过：否则本次构建什么都不会编，也没人收到通知" >&2
+            exit 1
+          fi
           echo "owrt_version=$OWRT_TAG" >> "$GITHUB_OUTPUT"
 
           OWRT_SAFE="${OWRT_TAG#v}"
@@ -142,13 +153,19 @@ jobs:
           if [ -n "$INPUT_NIKKI_REF" ]; then
             NIKKI_REF="$INPUT_NIKKI_REF"
           else
-            NIKKI_REF=$(curl -sL "https://api.github.com/repos/${{ env.NIKKI_REPO }}/releases/latest" \
+            NIKKI_REF=$(curl -sL --retry 2 --retry-delay 2 --max-time 30 \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ env.NIKKI_REPO }}/releases/latest" \
               | jq -r '.tag_name // empty')
           fi
           echo "nikki_ref=$NIKKI_REF" >> "$GITHUB_OUTPUT"
 
           # 保留 tag 名用于显示
-          NIKKI_TAG=$(curl -sL "https://api.github.com/repos/${{ env.NIKKI_REPO }}/releases/latest" \
+          NIKKI_TAG=$(curl -sL --retry 2 --retry-delay 2 --max-time 30 \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ env.NIKKI_REPO }}/releases/latest" \
             | jq -r '.tag_name // empty')
           echo "nikki_tag=$NIKKI_TAG" >> "$GITHUB_OUTPUT"
 
@@ -179,9 +196,6 @@ jobs:
           if [ "$FORCE_BUILD" = "true" ] || [ "$EVENT_NAME" = "pull_request" ]; then
             echo "should_build=true" >> "$GITHUB_OUTPUT"
             echo "✅ 强制构建（force_build=true）"
-          elif [ -z "$OWRT_TAG" ]; then
-            echo "should_build=false" >> "$GITHUB_OUTPUT"
-            echo "⏭️  OpenWrt 版本为空，跳过构建"
           elif [ "$COMPOSITE" != "$SAVED" ]; then
             echo "should_build=true" >> "$GITHUB_OUTPUT"
             echo "✅ 检测到更新: $COMPOSITE (上次: $SAVED)"
@@ -790,7 +804,8 @@ jobs:
 
   # ─── Job 4.7: 失败通知（任何 job 红都发一张红卡） ──────────────────────
   notify-failure:
-    needs: [lint, check-upstream, build, qemu-smoke-test, release, ci-prerelease, persist-last-build]
+    # 注意：qemu-env 也要列进来，否则它单独失败时（其余 job 都 skipped）不会发失败卡片
+    needs: [lint, qemu-env, check-upstream, build, qemu-smoke-test, release, ci-prerelease, persist-last-build]
     if: failure()
     runs-on: ${{ inputs.runner_image || vars.RUNNER_IMAGE || 'ubuntu-26.04' }}
     permissions:

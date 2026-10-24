@@ -154,12 +154,13 @@ lint ─ qemu-env ─ check-upstream ─ build ─ qemu-smoke-test ─┬─ rel
 |------|------|----------|
 | `lint` | `bash -n` / `py_compile` / workflow YAML / feeds 分隔符契约 | 所有 PR 与手动触发 |
 | `qemu-env` | 在 runner 上真装一遍 QEMU/OVMF 并打印版本（镜像/包名漂移早暴露） | 总是（约 1.5 分钟） |
+| `qemu-env` | 在 runner 上真装一遍 QEMU/OVMF 并打印版本（镜像/包名漂移早暴露） | 总是（约 1.5 分钟） |
 | `check-upstream` | 解析 OpenWrt latest tag、Nikki ref → 完整 SHA；与 `last_build_version` 比对 | 总是 |
 | `build` | 三层缓存 → feeds → `.config` → 编译 → 签名 → 上传 Artifact | 有新版本 / `force_build` / PR 打 `ci:full-build` |
 | `qemu-smoke-test` | QEMU 起固件，LuCI 返回 200 + JS 非 gzip | 同 `build` |
 | `release` | GitHub Release + Discord 成功卡片 | 仅 `main` |
 | `ci-prerelease` | 发 `ci-*` prerelease 直链，便于刷机测试 | 仅 PR |
-| `notify-failure` | 任一任务失败时发红色失败卡片（失败任务 + 失败步骤 + 日志链接） | 任一任务失败 |
+| `notify-failure` | 任一任务失败时发红色失败卡片（失败任务 + 失败步骤 + 日志链接） | 任一任务失败（含 `qemu-env`） |
 | `persist-last-build` | 回写 `last_build_version`（commit 带 `[skip ci]`） | 仅 `main` |
 
 **通知**：成功/失败卡片都发到 Discord「🖥️・固件发布」频道。失败卡片会列出失败任务与失败步骤，并附「查看运行日志」按钮；缺 `DISCORD_BOT_TOKEN` 时通知步骤跳过，不影响构建本身。
@@ -172,6 +173,8 @@ lint ─ qemu-env ─ check-upstream ─ build ─ qemu-smoke-test ─┬─ rel
 - ⚠️ **新镜像出厂会清空 apt 索引**：任何 `apt-get install` 前必须先 `sudo apt-get update -qq`，
   否则会「找不到包」而静默失败（2026-10-24 就在这里挂了 21 秒）。安装/定位逻辑统一收在
   `scripts/qemu-env.sh`，错误全部可见；`qemu-env` 任务每次流水线都跑，镜像或包名一变几分钟内就红
+- ⚠️ **取不到上游版本 = 硬失败**：查 GitHub API 一律带 `GITHUB_TOKEN`（匿名调用共享 IP 配额，
+  容易被限流后静默拿到空值）。取不到就 `exit 1` 发失败卡片，绝不「静默跳过当无事发生」
 
 ### 缓存 Key（摘要）
 
@@ -254,7 +257,7 @@ Oasisic-OpenWrt/
 | **手动 · `nikki_ref` 留空** | 同上，**仍是 latest Tag** | 同上，**与定时相同** | 适合「策略不变，只想再跑一遍」 |
 | **手动 · 填写 `nikki_ref`** | 同上，**仍是 latest Tag** | **你填的 Tag / 分支 / Commit** | 例如 `v1.26.2`、`main`、`31339d5` |
 | **`force_build=true`** | 不改变选版 | 不改变选版 | 只强制编译，忽略「版本没变就跳过」 |
-| **PR 触发**（改 workflow / scripts / files） | 同上，**仍是 latest Tag** | 同上 | 默认只跑 `lint`；打 `ci:full-build` 标签才全量编译，产物走 prerelease |
+| **PR 触发**（改 workflow / scripts / files） | 同上，**仍是 latest Tag** | 同上 | 默认只跑 `lint` + `qemu-env`；打 `ci:full-build` 标签才全量编译，产物走 prerelease |
 
 补充（容易误解的点）：
 
