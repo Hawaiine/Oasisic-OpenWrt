@@ -114,6 +114,17 @@ jobs:
           grep -q 'MINISIGN_PUBLISHED_ASSETS' scripts/minisign-sign.sh \
             || { echo "❌ minisign-sign.sh 未接入发布清单裁剪"; exit 1; }
 
+          # Release tag 必须带构建批次（run_number）：否则同一版本组合重建会复用 tag，
+          # 资产原地替换、历史锚点丢失。
+          # 模式拆成两半拼，避免这条检查把自己写下的模式串当成命中（自匹配），
+          # 也避免在 run 块里写出会被 Actions 展开的表达式字面量。
+          TAG_P1='RELEASE_TAG:.*nikki_short'
+          TAG_P2='_sha.*run_number'
+          grep -qE "$TAG_P1$TAG_P2" "$WF" \
+            || { echo "❌ Release tag 未带构建批次（run_number）"; exit 1; }
+          [ "$(grep -c 'env.RELEASE_TAG' "$WF")" -ge 3 ] \
+            || { echo "❌ tag 未走单一 env.RELEASE_TAG 定义（Release/校验/通知应各引用一次）"; exit 1; }
+
           echo "✅ 发布清单契约成立（$(echo "$ENTRIES" | wc -l) 项 / 无重复 / 两条上传路径均来自清单）"
 
   # ─── Job 0.5: QEMU 环境自检（每次都跑，提前发现 runner 镜像 / apt 变化）──
@@ -704,6 +715,11 @@ jobs:
     needs: [check-upstream, build, qemu-smoke-test]
     if: needs.check-upstream.outputs.should_build == 'true' && github.event_name != 'pull_request'
     runs-on: ${{ inputs.runner_image || vars.RUNNER_IMAGE || 'ubuntu-26.04' }}
+    env:
+      # tag 名带构建批次（run_number）：同一 OpenWrt+Nikki 组合重建时得到**独立** tag 与
+      # 独立 Release，历史资产与历史源码指向都保留，tag 名与资产一一对应。
+      # 只在这里定义一次，Release 名 / 通知 / 对齐校验都引用它，避免多处各写一份再漂移。
+      RELEASE_TAG: ${{ needs.check-upstream.outputs.owrt_ver_safe }}-n${{ needs.build.outputs.nikki_short_sha }}-r${{ github.run_number }}
     steps:
       - uses: actions/checkout@v7
       - name: 📥 下载固件 Artifact
@@ -812,30 +828,29 @@ jobs:
         uses: softprops/action-gh-release@v3
         if: github.ref == 'refs/heads/main'
         with:
-          tag_name: ${{ needs.check-upstream.outputs.owrt_ver_safe }}-n${{ needs.build.outputs.nikki_short_sha }}
-          name: 🏝️ Oasisic OpenWrt ${{ needs.check-upstream.outputs.owrt_ver_safe }} (nikki-${{ needs.build.outputs.nikki_short_sha }})
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: 🏝️ Oasisic OpenWrt ${{ needs.check-upstream.outputs.owrt_ver_safe }} (nikki-${{ needs.build.outputs.nikki_short_sha }}, r${{ github.run_number }})
           fail_on_unmatched_files: true
           make_latest: true
           generate_release_notes: false
           body_path: release-body.md
           files: ${{ steps.release-assets.outputs.files }}
 
-      - name: 🏷️ 把 tag 对齐到本次构建的提交
-        # tag 名只带 OpenWrt 版本 + Nikki 短 SHA，重建时 Release 资产是「同 tag 原地替换」，
-        # tag 自身不会跟着动。结果：tag 指向旧提交，按 tag 复现源码的人拿到的是修复前的
-        # workflow（历史上真的发生过：tag 停在 34cfbec9，资产却由 eebe0040 构建）。
-        # 这里在发布后把 tag 强制指向本次构建提交，让「tag = 产出这批资产的源码」恒成立。
+      - name: 🏷️ 校验 tag 落在本次构建的提交上
+        # tag 名带 run_number，softprops 建 tag 时会落在本次构建提交上；这里做发布后校验：
+        # 不一致就强制修正（历史上出现过 tag 停在旧提交 34cfbec9、资产却由 eebe0040 构建）。
+        # 保留这步的意义：任何「同 tag 复用」的回归都会被档住，且结果以回读为准。
         if: github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          TAG="${{ needs.check-upstream.outputs.owrt_ver_safe }}-n${{ needs.build.outputs.nikki_short_sha }}"
+          TAG="${{ env.RELEASE_TAG }}"
           API="https://api.github.com/repos/${{ github.repository }}/git/refs/tags/$TAG"
           gh_get() { curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -H "User-Agent: openwrt-ci" "$1"; }
           CUR=$(gh_get "$API" | python3 -c 'import json,sys;print(json.load(sys.stdin)["object"]["sha"])')
           if [ "$CUR" = "$GITHUB_SHA" ]; then
-            echo "✅ tag $TAG 已指向 $GITHUB_SHA，无需移动"
+            echo "✅ tag $TAG 已指向 $GITHUB_SHA（构建批次 tag 正常）"
           else
             echo "🔁 tag $TAG 当前指向 $CUR → 移动到 $GITHUB_SHA"
             curl -fsSL -X PATCH -H "Authorization: Bearer $GH_TOKEN" \
@@ -858,8 +873,8 @@ jobs:
           NIKKI_VER: ${{ needs.build.outputs.nikki_version_actual }}
           KERNEL_VER: ${{ needs.build.outputs.kernel_version }}
           ROOT_PASS: ${{ needs.build.outputs.root_password }}
-          TAG: ${{ needs.check-upstream.outputs.owrt_ver_safe }}-n${{ needs.build.outputs.nikki_short_sha }}
-          RELEASE_URL: https://github.com/${{ github.repository }}/releases/tag/${{ needs.check-upstream.outputs.owrt_ver_safe }}-n${{ needs.build.outputs.nikki_short_sha }}
+          TAG: ${{ env.RELEASE_TAG }}
+          RELEASE_URL: https://github.com/${{ github.repository }}/releases/tag/${{ env.RELEASE_TAG }}
           BUILD_TIME: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')
         run: python3 scripts/notify-discord.py
         continue-on-error: true
