@@ -81,7 +81,7 @@
 | 🧭 首次向导 | 纯 HTML/CSS/JS + CGI；完成后自禁用 |
 | 🈴 中文 LuCI | `99-custom` 注册 `luci.languages.zh_cn`（规避 openwrt#16987） |
 | 🌐 诊断默认 | DNSPod `119.29.29.29` |
-| 🧹 维护任务 | `cleanup-actions.yml` 每 3 天清理过期失败 run / 旧 cache |
+| 🧹 维护任务 | `cleanup-actions.yml` 每 3 天清理过期失败 run / 旧 cache；`prune-releases.yml` 每 3 天按保留策略清理历史 Release |
 
 ---
 
@@ -218,7 +218,8 @@ Oasisic-OpenWrt/
 │   ├── workflows/
 │   │   ├── openwrt-auto-build.yml   # 主构建流水线（正式 + PR 验证）
 │   │   ├── keepalive.yml            # 每周心跳，防 60 天无活动被停用
-│   │   └── cleanup-actions.yml      # 定时清理失败 run / 旧 cache
+│   │   ├── cleanup-actions.yml      # 定时清理失败 run / 旧 cache
+│   │   └── prune-releases.yml       # 定时按保留策略清理历史 Release / tag
 │   ├── keepalive                      # 每周心跳时间戳（首次运行后生成）
 │   └── minisign.pub
 ├── files/                           # 注入 rootfs 的文件
@@ -328,6 +329,26 @@ Oasisic-OpenWrt/
 2. PR 构建**永远不会**回写 `last_build_version`
 
 > 打标签不会自动触发新 run：要么推一个 commit，要么 Actions → Run workflow，`ref` 选 PR 分支。
+
+---
+
+## 🧹 Release 保留策略
+
+批次 tag 让每次重建都产出**独立** Release（历史不再被覆盖，代价是数量会累积）。
+`prune-releases.yml` 每 3 天（UTC 18:30 / 北京 02:30）清理一次，默认策略：
+
+| 对象 | 策略 | 说明 |
+|------|------|------|
+| 正式 Release | 保留最近 **5** 个 | 最新那个 = `latest`，**永不删**；其余连 tag 一起删 |
+| PR 验证件（prerelease） | 保留 **14** 天 | 只是刷机测试件，过期即删 |
+| 非批次 tag 的 Release | **一律保留** | tag 名不符合 `*-n<7位hex>-r<数字>` 视为手工发布，fail-closed 不删 |
+| draft | **一律保留** | 草稿不进清理范围 |
+
+删除后逐个 API 回读确认（Release 404 / tag 404），有残留则该任务失败并推 Discord 红卡；
+决策逻辑有离线自检（`scripts/test-prune-releases.sh`，lint 每 PR 跑），自检只做 dry-run、不碰远端。
+
+手动调整：Actions → `prune-releases` → **Run workflow**，可填 `keep` / `prerelease_keep_days`；
+**默认勾着 dry_run**，先看一遍计划（保留哪些、删哪些、原因），确认后再取消勾选重跑。
 
 ---
 

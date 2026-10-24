@@ -1,0 +1,79 @@
+# =============================================================================
+# prune-releases — 清理历史 Release / tag
+#
+# 为什么需要：release tag 现在是 `{OpenWrt版本}-n{Nikki短SHA}-r{构建号}`，每次重建都会
+# 新增一个独立 Release（每个约 340MB）。没有保留策略的话，按每天一次定时算，
+# 一个月就是 ~30 个 / ~10GB 累积。
+#
+# 策略（默认值即线上策略，可用 dispatch 输入覆盖）：
+#   - 正式 Release：保留最近 5 个（最新那个 = latest，永不删）
+#   - PR 验证件（prerelease）：保留 14 天
+#   - 非批次 tag（可能是手工发布）、draft：一律保留（fail-closed，宁可不删）
+#   - 每次删除后逐个 API 回读确认（Release 404 / tag 404），有残留则本任务失败
+#
+# 定时跑 = 真删；手动触发默认 dry-run，要先看计划再取消勾选 dry_run。
+# =============================================================================
+name: prune-releases
+
+on:
+  schedule:
+    - cron: '30 18 */3 * *'   # 每 3 天 UTC 18:30 / 北京 02:30（与 cleanup-actions 同批）
+  workflow_dispatch:
+    inputs:
+      keep:
+        description: '保留最近多少个正式 Release（含 latest）'
+        type: string
+        default: '5'
+      prerelease_keep_days:
+        description: 'PR 验证件（prerelease）保留天数'
+        type: string
+        default: '14'
+      dry_run:
+        description: '只打印计划、不删除（默认勾选，确认计划后可取消）'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: prune-releases
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    runs-on: ubuntu-26.04   # 固定镜像：ubuntu-latest 迁移窗口期不可控（runner-images#14748）
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 🧹 按保留策略清理 Release / tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          KEEP: ${{ inputs.keep || '5' }}
+          PRERELEASE_KEEP_DAYS: ${{ inputs.prerelease_keep_days || '14' }}
+          # 定时触发 = 真删；手动触发默认 dry-run（除非显式取消勾选）
+          DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          python3 scripts/prune-releases.py | tee /tmp/prune.log
+          {
+            echo "### 🧹 Release 清理（keep=${{ inputs.keep || '5' }} · 验证件 ${{ inputs.prerelease_keep_days || '14' }} 天 · 触发=${{ github.event_name }}）"
+            echo '```'
+            cat /tmp/prune.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 📣 失败卡片（🖥️・固件发布）
+        if: failure()
+        env:
+          DISCORD_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/notify-discord-failure.py
+        continue-on-error: true
