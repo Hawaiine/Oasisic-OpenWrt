@@ -27,6 +27,8 @@ if not token:
 
 owrt = os.environ.get("OWRT_VER", "?")
 nikki = os.environ.get("NIKKI_VER", "?")
+# Nikki（luci-app-nikki）与 mihomo 核心是两个包、两个版本号，卡片上必须分开写
+mihomo = os.environ.get("MIHOMO_VER", "").strip()
 kernel = os.environ.get("KERNEL_VER", "")
 root_pass = os.environ.get("ROOT_PASS", "")
 tag = os.environ.get("TAG", "?")
@@ -35,10 +37,16 @@ build_time = os.environ.get("BUILD_TIME", "").strip()
 if not build_time or "$(" in build_time:
     build_time = datetime.now(BJ_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
-# 副标题：只放版本号与架构，不加 "OpenWrt / Nikki / Kernel" 字样
-subtitle_bits = [b for b in (owrt, nikki) if b and b != "?"]
+# 副标题：版本号带标签（OpenWrt / Nikki / mihomo / 内核），避免裸数字分不清哪家版本
+subtitle_bits = []
+if owrt and owrt != "?":
+    subtitle_bits.append(f"OpenWrt {owrt}")
+if nikki and nikki != "?":
+    subtitle_bits.append(f"Nikki {nikki}")
+if mihomo and mihomo != "?":
+    subtitle_bits.append(f"mihomo-meta {mihomo}")
 if kernel and kernel != "?":
-    subtitle_bits.append(kernel)
+    subtitle_bits.append(f"内核 {kernel}")
 subtitle_bits.append("x86/64")
 SUBTITLE = " · ".join(subtitle_bits)
 
@@ -58,10 +66,18 @@ def build_v2() -> dict:
             "type": 10,
             "content": (
                 "### 📦 下载\n"
-                "`squashfs-combined-efi.img.gz` 推荐 · PVE UEFI\n"
-                "`squashfs-combined.img.gz` BIOS 启动\n"
-                "`image.iso` / `image-efi.iso` ISO 镜像\n"
-                "`sha256sums` + `sha256sums.minisig` 校验与签名"
+                "`openwrt-x86-64-generic-squashfs-combined-efi.img.gz` 推荐 · PVE UEFI\n"
+                "`openwrt-x86-64-generic-squashfs-combined.img.gz` 传统 BIOS\n"
+                "`openwrt-x86-64-generic-image-efi.iso` / `openwrt-x86-64-generic-image.iso` ISO 镜像"
+            ),
+        },
+        {
+            "type": 10,
+            "content": (
+                "### 🔒 校验下载\n"
+                "`sha256sum -c --ignore-missing sha256sums`\n"
+                "`minisign -V -m sha256sums -x sha256sums.minisig -p minisign.pub`\n"
+                "-# 校验和只收录本次发布内的文件（未发布产物不进清单），不会再报无从比对的 FAILED"
             ),
         },
         {
@@ -98,11 +114,19 @@ def build_embed() -> dict:
         {"name": "🏗️ **OpenWrt**", "value": f"`{owrt}`", "inline": True},
         {"name": "📡 **Nikki**", "value": f"`{nikki}`", "inline": True},
     ]
+    if mihomo and mihomo != "?":
+        fields.append({"name": "🐱 **mihomo-meta**", "value": f"`{mihomo}`", "inline": True})
     if kernel and kernel != "?":
         fields.append({"name": "🐧 **Kernel**", "value": f"`{kernel}`", "inline": True})
     fields += [
         {"name": "🏷️ **版本标签**", "value": f"`{tag}`", "inline": True},
         {"name": "📦 **下载链接**", "value": f"[🔗 前往 Release 页面]({release_url})", "inline": False},
+        {
+            "name": "🔒 **校验**",
+            "value": "`sha256sum -c --ignore-missing sha256sums`\n"
+                     "`minisign -V -m sha256sums -x sha256sums.minisig -p minisign.pub`",
+            "inline": False,
+        },
         {"name": "⏱ **编译完成**", "value": f"{build_time} 北京时间", "inline": False},
     ]
     return {

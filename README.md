@@ -71,7 +71,7 @@
 | 🏗️ 全量 SDK | 从 OpenWrt 源码编译，Nikki / mihomo-meta / luci-app-nikki 由 feeds 源码集成 |
 | 🔄 定时 + 手动 | 每天 UTC 06:00（北京 14:00）检测上游，GitHub 排队常延到北京 18:00–22:30；Actions 可手动 `force_build` / `nikki_ref` / `runner_image` |
 | 📌 Nikki 钉定 | 解析 Tag/分支/短 SHA → 完整 40 位 SHA；feeds 使用 `url^SHA`（Commit）或 `url;Tag/分支` |
-| 🏷️ Release 命名 | `{OpenWrt版本}-n{Nikki短SHA}`（如 `25.12.6-n31339d5`），同版本不同 Nikki 提交可共存 |
+| 🏷️ Release 命名 | `{OpenWrt版本}-n{Nikki短SHA}-r{构建号}`（如 `25.12.6-n31339d5-r240`），同版本不同 Nikki 提交、同组合的每次重建都各自独立 |
 | 🧪 QEMU 门禁 | 启动固件，检查 LuCI 返回 200 与 JS 资源非 gzip；qemu/OVMF 缺失直接失败（不再“绿着跳过”） |
 | 🔬 PR 验证 | 改 workflow / scripts / files 的 PR 自动跑 lint；打 `ci:full-build` 标签跑全量编译，产物走 `ci-*` prerelease |
 | 🔔 通知 | 成功/失败都发 Discord 卡片（Components V2）；失败卡片直接列出失败任务与失败步骤 |
@@ -265,7 +265,10 @@ Oasisic-OpenWrt/
 1. **OpenWrt 目前没有手动版本参数**：定时和手动都跟官方 **最新 Release Tag**；不能在 Actions UI 里改 OpenWrt 版本（除非以后加 input）。
 2. **Nikki 仅有新 Commit、尚未发新 Tag 时**：定时 **不会** 自动带上该 Commit；要吃到它，必须 **手动** 填 `nikki_ref`（并常勾 `force_build`）。
 3. **包管理器里显示的 Nikki 版本号** 仍可能是 Tag 名（如 1.26.2）；以 Release 正文的 **Nikki ref** 和产物里 `feeds.conf.default` 的 `^完整SHA` 为准。
-4. **是否真的开编**：还看仓库里是否有 `last_build_version`、是否与  
+4. **「Nikki 版本」≠「mihomo 版本」**：正文里的 Nikki 版本是 `luci-app-nikki` 包（如 1.26.2），
+   mihomo 核心是另一个包 `mihomo-meta`（如 1.19.32），两者独立升级；正文表格、Discord 卡片都分列，
+   需要核对内核/代理实际版本时以产物里的 `openwrt-x86-64-generic.manifest` 为准。
+5. **是否真的开编**：还看仓库里是否有 `last_build_version`、是否与  
    `{OpenWrtTag}_nikki-{完整SHA}` 相同；相同且未 force 则会跳过。
 
 ---
@@ -299,8 +302,8 @@ Oasisic-OpenWrt/
 成功后：
 
 1. [Releases](https://github.com/Hawaiine/Oasisic-OpenWrt/releases) 下载产物  
-2. 标签形如 `25.12.6-n31339d5`（`{OpenWrt 版本}-n{Nikki 短 SHA}`）  
-3. 正文含 root 随机密码、Nikki 提交（ref）、内核版本  
+2. 标签形如 `25.12.6-n31339d5-r240`（`{OpenWrt 版本}-n{Nikki 短 SHA}-r{构建号}`）；每次重建独立成 tag + Release，历史版本不会被覆盖  
+3. 正文含 root 随机密码、Nikki 提交（ref）、mihomo 核心版本、内核版本、Release 标签与构建 run 号  
 4. 可选出现/更新 `last_build_version`（`persist-last-build` 依赖 token 可推 main）
 
 ---
@@ -356,9 +359,12 @@ sha256sum -c --ignore-missing sha256sums
 minisign -V -m sha256sums -x sha256sums.minisig -p minisign.pub
 ```
 
-发布后流水线还会把 tag（`{OpenWrt 版本}-n{Nikki 短 SHA}`）强制对齐到**本次构建的提交**：
-同一个 tag 重建时 GitHub Release 的资产是原地替换、tag 自身不会动，不对齐就会出现
-「tag 指向旧提交、资产却来自新提交」，按 tag 复现源码的人拿到的是修复前的 workflow。
+tag 名带构建批次（`-r{构建号}`），所以每次重建都会得到**独立的 tag 与 Release**：
+资产不会被原地替换，历史版本与「哪次构建产出哪批资产」都保留。发布后仍会做一次
+「tag 是否落在本次构建提交上」的校验（不一致则强制修正并回读），防止再次出现
+「tag 指向旧提交、资产却来自新提交」——这类漂移曾真实发生过（tag 停在 `34cfbec9`，
+资产却由 `eebe0040` 构建）。tag 名只在 workflow 的 `env.RELEASE_TAG` 定义一次，
+Release 名 / 校验步骤 / Discord 通知都引用它。
 
 `lint` 任务里有 `scripts/test-minisign-sign.sh` 自检：用临时密钥签一份假 `sha256sums`，
 再拿**官方 minisign 二进制**验签，并检查篡改后必须验签失败、自引用行与未发布产物行必须被裁掉、
@@ -494,7 +500,7 @@ GitHub 规则：**公开仓库在 60 天内没有仓库活动（没有新提交�
 ## 📜 版本与发布
 
 - **以 [Releases](https://github.com/Hawaiine/Oasisic-OpenWrt/releases) 为准**，不再维护易过期的手工版本表。  
-- 标签格式：`{OpenWrt版本号}-n{Nikki 短SHA}`，例如 `25.12.6-n31339d5`；PR 验证件为 `ci-{版本号}-pr{PR号}-r{run号}`。  
+- 标签格式：`{OpenWrt版本号}-n{Nikki 短SHA}-r{构建号}`，例如 `25.12.6-n31339d5-r240`（同组合重建 = 新 tag，历史保留）；PR 验证件为 `ci-{版本号}-pr{PR号}-r{run号}`。  
 - 工程变更看 `git log` / Actions；不在此逐条罗列构建编号。
 
 当前仓库若暂无 Release，说明产物已清理或尚未发布新构建——请直接跑手动/定时流水线生成。
