@@ -76,9 +76,9 @@ jobs:
           grep -q 'OpenWrt-nikki.git;v1.26.2' /tmp/f2 || { echo "❌ tag 未用 ;"; exit 1; }
           echo "✅ feeds 分隔符契约成立"
 
-  # ─── Job 0.5: QEMU 环境自检（仅 PR，提前发现 runner 镜像 / apt 变化）─────
+  # ─── Job 0.5: QEMU 环境自检（每次都跑，提前发现 runner 镜像 / apt 变化）──
+  # 成本约 1.5 分钟，换来「镜像或包名一变 2 分钟内就红」，而不是等一小时编译完才发现
   qemu-env:
-    if: github.event_name == 'pull_request'
     runs-on: ${{ inputs.runner_image || vars.RUNNER_IMAGE || 'ubuntu-26.04' }}
     timeout-minutes: 10
     steps:
@@ -529,8 +529,10 @@ jobs:
             FIRMWARE_GZ="$(find "firmware/bin/targets/x86/64/" -name '*-squashfs-combined.img.gz' -type f 2>/dev/null | head -1)"
           fi
           if [ -z "$FIRMWARE_GZ" ]; then
-            echo "⚠️ 未找到固件镜像，跳过 QEMU 测试"
-            exit 0
+            echo "❌ 未找到固件镜像（*squashfs-combined-efi.img.gz / *squashfs-combined.img.gz）"
+            echo "   烟雾测试不能静默跳过：产物命名变了或 artifact 异常，必须硬失败"
+            ls -R firmware/bin/targets/x86/64/ 2>/dev/null | head -30 || true
+            exit 1
           fi
 
           gunzip -k -f "$FIRMWARE_GZ"
