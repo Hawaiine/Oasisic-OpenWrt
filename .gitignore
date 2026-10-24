@@ -6,7 +6,7 @@
 *.bak
 .config.old
 .config.orig
-last_build_version
+# last_build_version 已受版本控制 — 勿再次忽略
 __pycache__/
 openwrt-imagebuilder/
 openwrt/
