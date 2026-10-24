@@ -26,6 +26,9 @@ if not token:
     sys.exit(1)
 
 owrt = os.environ.get("OWRT_VER", "?")
+# 上游 tag 带 v（v25.12.6），而本仓 tag / Release 名 / 资产名都用不带 v 的 25.12.6；
+# 卡片上与后者对齐，避免同一页出现两种写法
+owrt = owrt[1:] if owrt.startswith("v") else owrt
 nikki = os.environ.get("NIKKI_VER", "?")
 # Nikki（luci-app-nikki）与 mihomo 核心是两个包、两个版本号，卡片上必须分开写
 mihomo = os.environ.get("MIHOMO_VER", "").strip()
