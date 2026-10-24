@@ -142,17 +142,18 @@ uci set luci.diag.route='119.29.29.29'
 
 ## 🏗️ 编译流水线
 
-### 八个任务（正式构建与 PR 验证共用一条流水线）
+### 九个任务（正式构建与 PR 验证共用一条流水线）
 
 ```text
-lint ─ check-upstream ─ build ─ qemu-smoke-test ─┬─ release ── persist-last-build（仅 main）
-                                                 ├─ ci-prerelease（仅 PR）
-                                                 └─ notify-failure（任一步失败）
+lint ─ qemu-env ─ check-upstream ─ build ─ qemu-smoke-test ─┬─ release ── persist-last-build（仅 main）
+                        │                                    ├─ ci-prerelease（仅 PR）
+                        │                                    └─ notify-failure（任一步失败）
 ```
 
 | 任务 | 作用 | 何时运行 |
 |------|------|----------|
 | `lint` | `bash -n` / `py_compile` / workflow YAML / feeds 分隔符契约 | 所有 PR 与手动触发 |
+| `qemu-env` | 在 runner 上真装一遍 QEMU/OVMF 并打印版本（镜像/包名漂移早暴露） | 总是（约 1.5 分钟） |
 | `check-upstream` | 解析 OpenWrt latest tag、Nikki ref → 完整 SHA；与 `last_build_version` 比对 | 总是 |
 | `build` | 三层缓存 → feeds → `.config` → 编译 → 签名 → 上传 Artifact | 有新版本 / `force_build` / PR 打 `ci:full-build` |
 | `qemu-smoke-test` | QEMU 起固件，LuCI 返回 200 + JS 非 gzip | 同 `build` |
@@ -168,6 +169,9 @@ lint ─ check-upstream ─ build ─ qemu-smoke-test ─┬─ release ── p
 - Runner 固定 **`ubuntu-26.04`**（`ubuntu-latest` 在 2026-10-19→11-19 迁移窗口内会随机漂移，不用它）
 - 如需对比验证另一镜像：手动触发时填 `runner_image`（如 `ubuntu-24.04`），不改代码
 - 26.04 差异：`qemu-system-x86-64` 包已删除（用 `qemu-system-x86`）、`libncurses5-dev` 已无正式包（用 `libncurses-dev`）
+- ⚠️ **新镜像出厂会清空 apt 索引**：任何 `apt-get install` 前必须先 `sudo apt-get update -qq`，
+  否则会「找不到包」而静默失败（2026-10-24 就在这里挂了 21 秒）。安装/定位逻辑统一收在
+  `scripts/qemu-env.sh`，错误全部可见；`qemu-env` 任务每次流水线都跑，镜像或包名一变几分钟内就红
 
 ### 缓存 Key（摘要）
 
