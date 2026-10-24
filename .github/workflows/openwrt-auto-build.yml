@@ -871,6 +871,7 @@ jobs:
           DISCORD_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           OWRT_VER: ${{ needs.check-upstream.outputs.owrt_version }}
           NIKKI_VER: ${{ needs.build.outputs.nikki_version_actual }}
+          MIHOMO_VER: ${{ needs.build.outputs.mihomo_version }}
           KERNEL_VER: ${{ needs.build.outputs.kernel_version }}
           ROOT_PASS: ${{ needs.build.outputs.root_password }}
           TAG: ${{ env.RELEASE_TAG }}
